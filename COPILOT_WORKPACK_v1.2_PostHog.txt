@@ -1,0 +1,522 @@
+COPILOT WORKPACK: GPT 멀티 워크 모니터링 대시보드 (PostHog Edition)
+문서 버전: v1.2
+작성일: 2026-03-15
+목적:
+- GitHub Copilot / Copilot Chat / Copilot Agent가 바로 구현을 시작할 수 있게 작업 순서, 폴더 구조, 태스크 분해, 프롬프트를 제공한다.
+- 이 문서는 PRD_v1.2_PostHog.txt와 함께 사용한다.
+
+======================================================================
+0. 작업 목표
+======================================================================
+
+만들 것
+- Electron + React + TypeScript 데스크톱 앱
+- 외부 모니터 우선 배치
+- pane 수 입력 -> ChatGPT pane grid 생성
+- pane 확대/축소
+- ChatGPT 상태 감지 (generating/completed/completed-unread)
+- Ready Queue
+- Guide Panel
+- Local 저장
+- PostHog 텔레메트리(옵트인)
+- feature flags용 PostHog 연결 틀
+
+버리지 말아야 할 핵심
+- completed-unread 상태 유지
+- Ready Queue 신뢰성
+- PostHog 실패 시 local only 동작
+- 민감 텍스트 비전송
+
+======================================================================
+1. 개발 방식
+======================================================================
+
+원칙
+- 작은 PR 단위로 진행한다.
+- 매 단계마다 실행 가능한 상태를 유지한다.
+- UI보다 상태머신과 데이터 흐름을 먼저 안정화한다.
+- PostHog는 초기에 "이벤트 잘 쌓이는지"만 검증하고, 대시보드는 나중에 정리한다.
+- embedded ChatGPT에 analytics/autocapture 스크립트를 넣지 않는다.
+- Main Process를 시스템 오케스트레이터로 본다.
+
+브랜치 전략 예시
+- feat/bootstrap-electron
+- feat/pane-manager
+- feat/chatgpt-observer-v1
+- feat/local-workspace-store
+- feat/ready-queue
+- feat/guide-panel
+- feat/posthog-telemetry
+- feat/settings-and-optin
+- feat/feature-flags
+- fix/observer-edge-cases
+
+======================================================================
+2. 권장 리포지토리 구조
+======================================================================
+
+src/
+  main/
+    index.ts
+    app/
+      createMainWindow.ts
+      appLifecycle.ts
+    monitors/
+      displayService.ts
+    views/
+      paneManager.ts
+      paneLayout.ts
+      paneSessions.ts
+    workspace/
+      workspaceRepository.ts
+      workspaceService.ts
+      presetService.ts
+    telemetry/
+      telemetryService.ts
+      telemetryGateway.ts
+      localSink.ts
+      posthogSink.ts
+      transports/
+        posthogNodeTransport.ts
+        posthogHttpTransport.ts
+      queue/
+        telemetryQueueRepository.ts
+        telemetryRetryWorker.ts
+      schemas/
+        eventFactory.ts
+        eventNames.ts
+    settings/
+      settingsRepository.ts
+      settingsService.ts
+    ipc/
+      registerIpc.ts
+      channels.ts
+
+  preload/
+    index.ts
+    bridge/
+      paneBridge.ts
+    observers/
+      paneObserver.ts
+      mutationTracker.ts
+      heartbeat.ts
+    adapters/
+      siteAdapter.ts
+      chatgptAdapter.ts
+
+  renderer/
+    main.tsx
+    App.tsx
+    store/
+      useAppStore.ts
+      useWorkspaceStore.ts
+      useSettingsStore.ts
+    components/
+      PaneGridOverlay.tsx
+      PaneChrome.tsx
+      ReadyQueue.tsx
+      GuidePanel.tsx
+      SettingsDrawer.tsx
+      MonitorPicker.tsx
+      PaneStatusBadge.tsx
+    features/
+      shortcuts/
+      presets/
+      telemetry/
+    pages/
+      DashboardPage.tsx
+
+  shared/
+    types/
+      app.ts
+      pane.ts
+      workspace.ts
+      guide.ts
+      telemetry.ts
+    contracts/
+      ipc.ts
+    utils/
+      ids.ts
+      hash.ts
+      time.ts
+      debounce.ts
+
+======================================================================
+3. 먼저 설치할 패키지
+======================================================================
+
+필수
+- electron
+- react
+- react-dom
+- typescript
+- vite 또는 electron-vite
+- zustand
+- zod
+- uuid
+- posthog-node
+- better-sqlite3 또는 sqlite + migration 도구
+- pino
+
+개발 도구
+- vitest
+- @playwright/test
+- eslint
+- prettier
+
+선택
+- tailwindcss
+- clsx
+
+======================================================================
+4. 구현 순서 (중요)
+======================================================================
+
+Milestone 1: 앱 부트스트랩
+목표
+- Electron 창이 뜬다.
+- React HUD가 보인다.
+- 외부 모니터가 있으면 거기에 띄운다.
+
+완료 조건
+- npm run dev로 앱이 실행된다.
+- 모니터 정보가 콘솔에 표시된다.
+
+Milestone 2: PaneManager + Grid
+목표
+- 사용자가 pane 개수를 정하면 WebContentsView가 그 수만큼 생성된다.
+- 자동 grid가 계산된다.
+
+완료 조건
+- 1~9 pane 생성 가능
+- 각 pane bounds가 정상 배치
+- pane마다 ChatGPT 로드 가능
+
+Milestone 3: ChatGPT observer v1
+목표
+- preload에서 ChatGPT 상태를 감지한다.
+- generating / completed / unknown 정도만 먼저 처리한다.
+
+완료 조건
+- 상태 배지가 HUD에 반영된다.
+- 완료 시점에 pane completed 이벤트가 내부적으로 발생한다.
+
+Milestone 4: completed-unread + Ready Queue
+목표
+- 완료되었지만 아직 확인하지 않은 pane을 유지한다.
+- Ready Queue를 붙인다.
+
+완료 조건
+- pane을 안 보고 있을 때 완료되면 Ready Queue에 뜬다.
+- pane 확인 시 unread가 해제된다.
+
+Milestone 5: Guide Panel + Local persistence
+목표
+- pane별 projectName / nextAction / priority를 저장한다.
+- 재실행 후 복원된다.
+
+완료 조건
+- guide 입력 후 앱 재시작해도 남아 있다.
+
+Milestone 6: PostHog telemetry
+목표
+- Local queue + PostHogSink를 만든다.
+- opt-in일 때만 전송한다.
+
+완료 조건
+- workspace opened, pane completed, pane marked read, guide updated, preset applied가 PostHog에 들어간다.
+- 잘못된 token이어도 앱은 계속 동작한다.
+
+Milestone 7: Settings + Feature flags scaffold
+목표
+- telemetry opt-in/settings UI
+- PostHog feature flag fetch 틀
+
+완료 조건
+- host/token 저장 가능
+- feature flag fetch 실패가 UX를 막지 않음
+
+Milestone 8: hardening
+목표
+- slow/stalled/error/login-required
+- retry worker
+- shutdown flush
+- keyboard shortcuts
+- tests
+
+완료 조건
+- 기본 QA 시나리오 모두 통과
+
+======================================================================
+5. GitHub Copilot에 바로 넣을 작업 프롬프트
+======================================================================
+
+Prompt A: 부트스트랩
+"Electron + React + TypeScript 프로젝트를 생성해줘. Main Process, Renderer, Preload, Shared 폴더를 분리하고, 외부 모니터가 있으면 거기에 BrowserWindow를 띄우는 코드까지 만들어줘. 코드 스타일은 엄격한 TypeScript와 함수 분리 중심으로 해줘."
+
+Prompt B: PaneManager
+"Electron Main Process에서 WebContentsView 여러 개를 생성하고, 사용자가 입력한 paneCount(1~9)에 따라 자동 grid layout으로 배치하는 PaneManager 클래스를 만들어줘. BrowserView는 쓰지 말고 WebContentsView를 사용해줘."
+
+Prompt C: ChatGPT observer
+"Preload script에서 ChatGPT DOM을 관찰해 generating/completed/unknown 상태를 추정하는 ChatGPTAdapter를 만들어줘. DOM selector 실패나 페이지 구조 변경이 있어도 예외를 던지지 말고 unknown으로 폴백해줘. 상태 변화는 IPC로 Main Process에 보내줘."
+
+Prompt D: Ready Queue
+"Renderer에서 completed-unread pane을 모아 보여주는 Ready Queue 컴포넌트를 만들어줘. queue item 클릭 시 pane focus IPC를 호출하고 unread를 해제해줘."
+
+Prompt E: Local persistence
+"workspace, panes, guides, presets, readyQueue를 SQLite 또는 단순 로컬 저장소로 저장/복원하는 Repository와 Service 계층을 만들어줘. 타입은 zod로 검증해줘."
+
+Prompt F: PostHog telemetry
+"Electron Main Process용 TelemetryService를 만들어줘. Local queue에 이벤트를 먼저 저장하고, opt-in일 때만 posthog-node로 전송해줘. PostHog 전송 실패는 앱을 망가뜨리면 안 되고, queue retry worker가 나중에 재전송하게 해줘."
+
+Prompt G: privacy
+"Prompt/response 원문 텍스트는 텔레메트리로 보내지 않도록 eventFactory에서 스키마를 강제해줘. 자유 텍스트 필드는 hash나 length만 허용해줘."
+
+Prompt H: feature flags
+"Main Process에서만 PostHog feature flags를 불러오는 FeatureFlagService를 만들어줘. blinkEnabled, slowThresholdMs, stalledThresholdMs 같은 원격 설정 키를 지원하고, 실패 시 로컬 기본값으로 동작하게 해줘."
+
+======================================================================
+6. 구현해야 할 타입 정의
+======================================================================
+
+필수 타입
+- AppSettings
+- PostHogConfig
+- Workspace
+- PaneState
+- GuideData
+- ReadyQueueItem
+- TelemetryQueueItem
+- DomainEvent
+- TelemetryEvent
+- FeatureFlagSnapshot
+
+권장 enum
+- PaneStatus
+- PriorityLevel
+- TelemetryMode
+- ProviderType
+- ObserverHealth
+- EventName
+
+======================================================================
+7. 먼저 만들 인터페이스
+======================================================================
+
+DisplayService
+- listDisplays()
+- getPreferredDisplay()
+- watchDisplayChanges()
+
+PaneManager
+- createPanes(count)
+- destroyPane(id)
+- focusPane(id)
+- expandPane(id)
+- collapseExpandedPane()
+- relayout(bounds)
+
+SiteAdapter
+- matches(url)
+- bootstrap()
+- readSignals()
+- mapSignalsToTransition()
+- dispose()
+
+WorkspaceRepository
+- loadCurrent()
+- saveCurrent()
+- listPresets()
+- savePreset()
+- applyPreset()
+
+TelemetryGateway
+- capture(event)
+- captureImmediate(event)
+- flush()
+- shutdown()
+
+FeatureFlagService
+- refresh()
+- getBoolean(key)
+- getNumber(key)
+- getString(key)
+
+======================================================================
+8. PostHog 구현 가이드
+======================================================================
+
+기본 전략
+- posthog-node는 Main Process에서만 쓴다.
+- Renderer/Preload는 IPC로 Main에 domain event를 보낸다.
+- TelemetryService가 eventFactory를 통해 정규화한 후 capture한다.
+
+전송 모드
+- 개발 초기:
+  - Local only
+- PostHog 연결 후:
+  - Local + PostHog
+- fallback:
+  - PostHog HTTP API transport는 나중에 추가
+
+꼭 지킬 규칙
+- telemetryOptIn이 false면 원격 capture 금지
+- prompt/response 본문 금지
+- notes/objective 원문 금지
+- projectName은 hash만 허용
+- 앱 종료 시 flush/shutdown 호출
+- 전송 실패는 로그만 남기고 UX는 계속
+
+======================================================================
+9. PostHog 이벤트 1차 구현 목록
+======================================================================
+
+반드시 구현
+- app launched
+- workspace opened
+- workspace restored
+- pane created
+- pane generating started
+- pane completed
+- pane marked read
+- pane expanded
+- pane collapsed
+- guide updated
+- preset applied
+- settings updated
+- telemetry opted in
+- telemetry opted out
+- telemetry delivery failed
+
+다음 라운드
+- pane slow
+- pane stalled
+- pane login required
+- pane observer recovered
+- local queue drained
+- feature flags refreshed
+- feature flags refresh failed
+
+======================================================================
+10. eventFactory에서 강제할 공통 속성
+======================================================================
+
+필수 공통 속성
+- app_version
+- platform
+- provider
+- workspace_id
+- pane_id(optional)
+- pane_index(optional)
+- observer_version
+- adapter_name
+- pane_count_total
+- selected_monitor_id
+- monitor_count
+
+금지 필드
+- rawPrompt
+- rawResponse
+- rawNotes
+- rawObjective
+- rawDomHtml
+- sessionCookie
+- authToken
+
+허용 보조 필드
+- project_name_hash
+- objective_length
+- notes_length
+- duration_ms
+- detection_confidence
+
+======================================================================
+11. 로컬 큐 구현 체크리스트
+======================================================================
+
+- queue table 생성
+- enqueue(event)
+- dequeueBatch(limit)
+- markSent(ids)
+- markFailed(id, error)
+- scheduleRetry(id, nextRetryAt)
+- worker interval
+- app resume 시 재시도
+- online event 시 재시도
+- shutdown 전 flush
+
+재시도 정책 예시
+- 1회: 10초
+- 2회: 30초
+- 3회: 1분
+- 4회: 5분
+- 5회 이상: 15분
+
+======================================================================
+12. ChatGPT observer v1 구현 힌트
+======================================================================
+
+v1 목적
+- 100% 정확도가 아니라 "안전한 추정"이 목표다.
+- generating/completed를 우선 잡는다.
+
+가능한 신호
+- stop 버튼 존재
+- assistant message 수 증가
+- DOM mutation이 계속 발생
+- 일정 시간 mutation 정지
+- 로그인 화면 마커
+- 오류 페이지 마커
+
+중요
+- selector는 한 군데만 믿지 말고 복수 후보를 둔다.
+- heuristic 신뢰도가 낮으면 unknown.
+- DOM 구조 변경은 자주 일어날 수 있다고 가정한다.
+
+======================================================================
+13. 테스트 계획
+======================================================================
+
+단위 테스트
+- paneLayout 계산
+- status transition reducer
+- eventFactory redaction
+- queue retry 계산
+- guide debounce 저장
+- ready queue reducer
+
+통합 테스트
+- pane 생성/삭제
+- 확대/축소
+- unread 생성/해제
+- preset 저장/복원
+- telemetry opt-in/off
+
+수동 QA
+- 2nd monitor 연결/해제
+- 인터넷 끊김 후 재연결
+- 잘못된 PostHog token
+- ChatGPT 로그아웃 상태
+- observer selector 실패
+- 앱 종료 직전 queue flush
+
+======================================================================
+14. Definition of Done
+======================================================================
+
+각 milestone은 아래를 만족해야 Done이다.
+- 코드 빌드 성공
+- 최소 1개 이상의 테스트 추가
+- 주요 타입이 shared/types에 정리됨
+- 에러 처리 경로가 존재함
+- 민감 텍스트 비전송 규칙을 깨지 않음
+- 로그 메시지가 너무 시끄럽지 않음
+- 다음 milestone이 이어서 작업 가능함
+
+======================================================================
+15. 최종 작업 순서 한 줄 버전
+======================================================================
+
+Electron 띄우기 -> WebContentsView pane 생성 -> ChatGPT observer -> unread/Ready Queue -> Guide 저장 -> PostHog queue -> Settings/opt-in -> feature flags -> hardening/tests
+
+끝.

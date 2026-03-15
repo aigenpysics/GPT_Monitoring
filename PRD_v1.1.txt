@@ -1,0 +1,1168 @@
+PRD: GPT 멀티 워크 모니터링 대시보드
+문서 버전: v1.1
+작성일: 2026-03-15
+문서 목적: GitHub Copilot이 바로 구현을 시작할 수 있을 정도로 구체적인 제품 요구사항, 기술 아키텍처, 외부 모니터링 연동 방식을 정의한다.
+
+======================================================================
+0. v1.1 변경 요약
+======================================================================
+
+v1.1에서 추가/수정된 핵심 사항
+- 제품 포지션을 "여러 GPT 화면 뷰어"가 아니라 "AI 작업 관제판"으로 명확히 정의
+- 완료된 pane만 빠르게 모아보는 Ready Queue 추가
+- completed-unread 상태를 별도 관리하여, 사용자가 실제로 읽기 전까지 완료 상태를 유지
+- Workspace Preset(프리셋 저장/불러오기) 추가
+- Guide Panel 필드를 더 구조화함: projectName / objective / currentStatus / nextAction / priority / notes
+- 상태 체계를 확장함: slow / stalled / unknown 추가
+- 외부 모니터링 백엔드 연동 구조 추가 (Monitoring Sink Adapter)
+- 외부 툴 연동 방향을 명시:
+  - 기본 추천: PostHog (이벤트/행동 모니터링)
+  - 선택: Zep (프로젝트 기억/맥락 저장)
+  - 선택: Langfuse (향후 API 모드용 트레이싱)
+- Electron 구현 권장안을 <webview> 중심에서 WebContentsView 중심으로 갱신
+- 보안/개인정보 규칙 강화: 외부 전송은 기본적으로 메타데이터만, 텍스트 본문 전송은 명시적 opt-in
+
+======================================================================
+1. 제품 개요
+======================================================================
+
+제품명(가칭)
+- GPT Monitor Wall
+- AI Work Control Tower
+- Multi-GPT Ops Dashboard
+
+문제 정의
+- 사용자는 여러 개의 GPT 대화창을 동시에 켜 두고 작업한다.
+- 하지만 현재는 브라우저 탭/창을 계속 오가야 해서 시간 낭비가 크다.
+- 어떤 대화가 아직 응답 생성 중인지, 어떤 대화가 이미 끝났는지 한눈에 파악하기 어렵다.
+- 각 대화가 어떤 프로젝트인지, 다음에 무엇을 해야 하는지도 쉽게 잊어버린다.
+- 단순히 "여러 창을 띄우는 것"만으로는 해결되지 않는다. 핵심은 완료 여부, 우선순위, 다음 액션을 잃지 않는 것이다.
+
+제품 비전
+- 두 번째 모니터를 AI 작업용 전용 관제판으로 사용한다.
+- 사용자가 지정한 수만큼 ChatGPT 화면을 분할해서 동시에 표시한다.
+- 각 pane의 상태를 실시간으로 감지하고, 완료된 pane만 빠르게 확인할 수 있게 한다.
+- 각 pane에 프로젝트 맥락과 다음 액션을 유지해, 작업 중단 후에도 즉시 재개할 수 있게 한다.
+
+핵심 가치
+- 컨텍스트 스위칭 감소
+- 답변 완료 인지 시간 단축
+- 병렬 작업 처리량 증가
+- 프로젝트 맥락 유지
+- "기다리는 일"과 "내가 해야 할 일"의 분리
+
+제품 본질 정의
+- 이 앱의 본질은 "GPT 여러 개 보기"가 아니다.
+- 이 앱의 본질은 "여러 AI 작업의 상태를 모니터링하고 다음 액션을 관리하는 것"이다.
+
+대상 사용자
+- 동시에 여러 GPT 대화를 돌리는 파워 유저
+- 기획, 개발, 리서치, 문서 작성, 자동화 업무를 병렬로 진행하는 사용자
+- 듀얼 모니터 이상 환경 사용자
+- 브라우저 탭보다 "작업 상태"를 관리하고 싶은 사용자
+
+MVP 범위
+- 1차 구현은 ChatGPT 웹앱 모니터링에 집중한다.
+- 구조는 확장 가능하게 설계하되, Claude/Gemini 등 타 서비스 지원은 후속 버전으로 미룬다.
+- 외부 모니터링 백엔드는 플러그형으로 설계하되, v1.1 구현 우선순위는 Local + PostHog + Optional Zep로 둔다.
+
+비범위(Out of Scope) - v1.1
+- 모바일 앱
+- 팀 협업
+- 자동 프롬프트 전송/자동 입력 에이전트
+- 여러 AI 서비스 동시 공식 지원
+- 클라우드 동기화의 완전한 제품화
+- 고급 분석 대시보드의 풀스택 구현
+- 강한 자동화(답변 자동 분류/자동 후속 액션 실행)
+
+======================================================================
+2. 제품 전략 및 핵심 판단
+======================================================================
+
+전략 A: 답변 완료 모니터
+- generating / completed / unread 상태를 정확히 보여 준다.
+- Ready Queue로 완료된 pane만 빠르게 확인할 수 있게 한다.
+
+전략 B: AI 작업 관제판
+- 각 pane에 프로젝트명, 목적, 다음 액션, 우선순위를 붙인다.
+- 사용자는 "현재 무엇을 기다리고 있는지"와 "다음에 무엇을 해야 하는지"를 함께 본다.
+
+최종 전략
+- v1.1은 전략 A와 B를 모두 포함한다.
+- 단, 자동 요약보다 수동 입력 + 자동 보조를 우선한다.
+- 즉, 제품의 중심은 "정확한 상태 감지" + "가벼운 작업 맥락 유지"다.
+
+아키텍처 원칙
+1) 모니터링 감지 로직은 앱 내부에서 직접 수행한다.
+2) 외부 툴은 감지 자체가 아니라 이벤트 저장/조회/분석 백엔드로 연결한다.
+3) 사이트별 감지 로직은 adapter 패턴으로 분리한다.
+4) 외부 벤더 종속을 피하기 위해 Monitoring Sink 인터페이스를 둔다.
+5) 사용자 데이터는 기본적으로 로컬 우선 저장한다.
+
+======================================================================
+3. 기술 방향의 핵심 결론
+======================================================================
+
+핵심 결론
+- "ChatGPT 웹 화면이 지금 generating인지 completed인지"를 알기 위해서는 앱이 각 pane 내부 페이지 상태를 직접 감지해야 한다.
+- 따라서 외부 모니터링 도구만 붙여서는 문제를 해결할 수 없다.
+- 외부 도구는 "감지된 이벤트를 기록하고, 분석하고, 나중에 조회하는 백엔드" 역할로 붙이는 것이 맞다.
+
+권장 구조
+- 내부: Pane Observer Engine
+- 외부: Monitoring Sink (PostHog / Zep / Langfuse 등)
+
+왜 이런 구조가 필요한가
+- 사용자가 보고 싶은 것은 "pane 4가 답변 끝났는가?"이다.
+- 이 정보는 ChatGPT 웹 페이지의 버튼/DOM/텍스트 변화에서 나온다.
+- Zep, Langfuse, Helicone 같은 도구는 이 상태를 대신 감지해 주지 않는다.
+- 따라서 감지는 내부에서, 저장/분석은 외부에서 분리해야 한다.
+
+======================================================================
+4. 외부 모니터링 툴 연동 방침
+======================================================================
+
+4.1 기본 추천
+
+기본 추천 벤더
+- PostHog
+
+추천 이유
+- 현재 제품의 핵심 데이터는 "pane lifecycle event"와 "사용자 행동 이벤트"다.
+- 예: generating 시작, completed, unread 해제, pane 확대, preset 적용, guide 수정
+- 이런 이벤트는 제품 분석 도구가 가장 잘 다룬다.
+- 따라서 v1.1의 기본 외부 백엔드는 PostHog로 정의한다.
+
+4.2 선택 연동
+
+선택 연동 A
+- Zep
+
+사용 목적
+- 프로젝트 맥락 기억
+- Guide Panel 변경 이력 저장
+- pane별 요약/nextAction/history를 장기적으로 축적
+- 나중에 "이 pane이 무슨 프로젝트였지?"를 검색/복원하는 메모리 레이어
+
+중요 판단
+- Zep은 메인 모니터링 백엔드가 아니라 "기억/맥락 저장 백엔드"로 쓰는 것이 더 적합하다.
+
+선택 연동 B
+- Langfuse
+
+사용 목적
+- 향후 API 모드 도입 시 LLM call trace 기록
+- prompt/response/token/latency 중심의 트레이싱
+- 사용자가 직접 OpenAI/Anthropic API를 이 앱에서 호출하는 버전으로 확장될 때 적합
+
+중요 판단
+- 현재 웹 UI 감시 중심의 v1.1에서는 필수가 아니다.
+- 단, Monitoring Sink 인터페이스 수준에서 연결 가능하도록 설계해 둔다.
+
+선택 연동 C
+- Helicone
+
+사용 목적
+- 향후 API Gateway 방식으로 AI 호출을 라우팅할 때
+- 모델 라우팅/폴백/비용 추적/LLM 관측성 강화
+
+중요 판단
+- 현재 ChatGPT 웹앱 모니터링 단계에서는 핵심 벤더가 아니다.
+- API 호출 중심 모드가 생기면 재검토한다.
+
+4.3 벤더 정책
+
+필수 조건
+- 외부 모니터링 백엔드는 언제든 교체 가능해야 한다.
+- 앱 내부 로직은 특정 벤더 SDK에 직접 묶이지 않아야 한다.
+- 모든 벤더 연동은 Sink Adapter 뒤에 숨긴다.
+
+벤더 추상화
+- MonitoringSink
+  - LocalSink
+  - PostHogSink
+  - LangfuseSink
+  - ZepMemorySink
+  - CompositeSink (복수 sink 동시 전송)
+
+v1.1 실제 구현 우선순위
+1) LocalSink (반드시)
+2) PostHogSink (권장 기본)
+3) ZepMemorySink (옵션)
+4) LangfuseSink (인터페이스만 먼저, 구현은 선택)
+
+======================================================================
+5. 구현 기술 스택 권장안
+======================================================================
+
+권장 구현 형태
+- Electron 기반 데스크톱 앱
+- 프론트엔드: React + TypeScript
+- 상태 관리: Zustand
+- 로컬 저장: SQLite 또는 electron-store
+- 스타일: Tailwind CSS 또는 CSS Modules
+
+중요 변경 사항
+- Electron의 <webview> 태그는 기본 권장안에서 제외한다.
+- 대신 WebContentsView 중심으로 설계한다.
+
+권장 이유
+- 외부 웹앱을 여러 개 독립 세션/독립 렌더링으로 제어하기 좋다.
+- 창 위치, 모니터 제어, always-on-top, bounds 조절, preload 주입이 용이하다.
+- 최신 Electron 방향성과 더 잘 맞는다.
+
+구현 개념
+- BrowserWindow는 앱 shell(HUD)을 렌더링한다.
+- 각 pane의 실제 ChatGPT 화면은 별도 WebContentsView로 만든다.
+- Renderer(React)는 헤더/가이드 패널/Ready Queue/설정창을 담당한다.
+- Main Process는 각 WebContentsView의 생성, 위치, bounds, navigation, preload, session을 관리한다.
+
+======================================================================
+6. 사용자 시나리오
+======================================================================
+
+시나리오 A: 첫 실행
+1) 사용자가 앱을 실행한다.
+2) 앱은 연결된 모니터를 감지한다.
+3) 외부 모니터가 있으면 해당 모니터에 창을 연다.
+4) 사용자에게 "몇 개의 GPT 화면을 동시에 사용할지"를 묻는다.
+5) 사용자가 4를 입력하면 2x2 그리드가 생성된다.
+6) 각 pane에는 ChatGPT 홈 또는 마지막 URL이 열린다.
+
+시나리오 B: 답변 완료 감지
+1) pane 2는 생성 중이다.
+2) pane 4도 생성 중이다.
+3) pane 2의 응답이 먼저 끝난다.
+4) pane 2는 completed-unread로 바뀌고 깜빡인다.
+5) 동시에 Ready Queue에 pane 2가 추가된다.
+6) 사용자가 Ready Queue에서 pane 2를 클릭하면 해당 pane에 포커스가 이동한다.
+7) unread 상태가 해제된다.
+
+시나리오 C: 작업 맥락 유지
+1) 사용자는 pane 1에 "신규 기능 PRD", pane 2에 "FastAPI auth", pane 3에 "경쟁사 조사"를 붙여 둔다.
+2) 각 pane의 nextAction을 적어 둔다.
+3) 사용자가 잠시 자리를 비웠다가 돌아온다.
+4) Ready Queue와 Guide Panel을 보고 즉시 작업을 재개한다.
+
+시나리오 D: 프리셋 사용
+1) 사용자는 4-pane "개발 모드", 6-pane "리서치 모드"를 저장해 둔다.
+2) 다음 실행 시 원하는 preset을 선택한다.
+3) pane 수, URL, guide, 레이아웃, 모니터 위치가 복원된다.
+
+시나리오 E: 외부 기억 백엔드 사용
+1) 사용자는 Zep API 키를 설정한다.
+2) guide 변경, 프로젝트명 변경, 중요한 pane 완료 이벤트를 Zep에 JSON 이벤트로 저장한다.
+3) 나중에 이력과 프로젝트 맥락을 검색/복원한다.
+
+======================================================================
+7. 정보 구조 (IA)
+======================================================================
+
+앱 구성
+- App Window
+  - Global Top Bar
+  - Ready Queue Panel
+  - Workspace Canvas
+    - Pane 1
+      - Pane Header (HUD)
+      - WebContentsView Area
+      - Guide Panel / Compact Overlay
+    - Pane 2
+    - Pane 3
+    - ...
+  - Preset Switcher
+  - Settings Modal
+  - Diagnostics Drawer
+
+Global Top Bar
+- 앱 제목
+- pane 개수 변경
+- preset 저장
+- preset 불러오기
+- 레이아웃 재정렬
+- 설정
+- always on top 토글
+- 현재 모니터 표시
+- 외부 모니터 우선 표시
+
+Ready Queue
+- completed-unread pane 목록
+- pane 제목
+- projectName
+- 완료 시각
+- 경과 시간
+- 클릭 시 해당 pane 포커스
+- "모두 읽음 처리" 버튼
+
+Pane Header
+- 프로젝트명 또는 자동 제목
+- 상태 배지
+- priority 뱃지
+- 새로고침
+- URL 이동
+- 확대
+- Guide Panel 토글
+- 닫기 또는 임시 숨김
+- diagnostics 아이콘(디버그 모드)
+
+Guide Panel
+- projectName
+- objective
+- currentStatus
+- nextAction
+- priority
+- notes
+- updatedAt
+- manualOverride 표시
+- optional auto-suggest
+- optional "Send to Zep" 상태 표시
+
+Compact Overlay
+- projectName 1줄
+- nextAction 1줄
+- 상태
+- priority
+
+======================================================================
+8. 기능 요구사항 (Functional Requirements)
+======================================================================
+
+8.1 워크스페이스 / 레이아웃
+
+FR-001
+- 사용자는 pane 개수를 1~9 범위에서 입력할 수 있어야 한다.
+
+FR-002
+- pane 개수 입력 즉시 그 수만큼 화면이 자동 분할되어야 한다.
+
+FR-003
+- 기본 그리드 배치 규칙
+  - columns = ceil(sqrt(n))
+  - rows = ceil(n / columns)
+
+FR-004
+- 창 크기 변경 시 layout bounds가 자동 재계산되어야 한다.
+
+FR-005
+- pane 수를 변경할 때 기존 pane URL/guide/state를 최대한 유지해야 한다.
+
+FR-006
+- 앱 재실행 시 마지막 workspace를 자동 복원할 수 있어야 한다.
+
+FR-007
+- preset 저장/불러오기 기능이 있어야 한다.
+
+FR-008
+- preset에는 pane 수, URL, guide, 우선순위, 레이아웃, 모니터 위치가 포함되어야 한다.
+
+8.2 두 번째 모니터
+
+FR-009
+- 앱 실행 시 연결된 디스플레이를 탐지해야 한다.
+
+FR-010
+- 외부 모니터가 있으면 기본적으로 해당 모니터에 앱 창을 열어야 한다.
+
+FR-011
+- 마지막 모니터/창 위치/크기를 저장하고 복원해야 한다.
+
+FR-012
+- 외부 모니터가 사라졌을 때는 기본 모니터로 안전하게 fallback 해야 한다.
+
+8.3 Pane 내 ChatGPT 표시
+
+FR-013
+- 각 pane은 독립적인 WebContentsView를 가져야 한다.
+
+FR-014
+- 기본 URL은 ChatGPT 홈 또는 마지막 대화 URL이다.
+
+FR-015
+- pane별 새로고침 기능이 있어야 한다.
+
+FR-016
+- pane별 URL 이동 기능이 있어야 한다.
+
+FR-017
+- 모든 pane은 기본적으로 동일 로그인 세션을 공유해야 한다.
+- 기본 session partition은 shared로 둔다.
+
+FR-018
+- pane별 고립 세션이 필요해지는 미래를 대비해 partition 전략을 추상화한다.
+
+8.4 상태 감지
+
+FR-019
+- 앱은 각 pane 상태를 감지해야 한다.
+- 최소 상태값:
+  - idle
+  - loading
+  - generating
+  - completed
+  - completed-unread
+  - slow
+  - stalled
+  - login-required
+  - error
+  - unknown
+
+FR-020
+- generating 시작 시점을 감지해야 한다.
+
+FR-021
+- completed 시점을 감지해야 한다.
+
+FR-022
+- completed 직후 아직 사용자가 읽지 않았으면 completed-unread로 표시해야 한다.
+
+FR-023
+- generating이 지정 임계치(예: 30초)를 넘으면 slow 상태를 추가 표시할 수 있어야 한다.
+
+FR-024
+- generating이 지정 임계치(예: 120초)를 넘거나 heartbeat가 멈추면 stalled 상태를 추가 표시할 수 있어야 한다.
+
+FR-025
+- 상태 감지는 preload + MutationObserver + 폴백 타이머 조합으로 구현한다.
+
+FR-026
+- 사이트별 감지 로직은 SiteAdapter로 분리한다.
+
+FR-027
+- selector 실패 시 unknown 또는 error 상태와 diagnostics 로그를 남겨야 한다.
+
+8.5 완료 알림 및 unread 관리
+
+FR-028
+- completed-unread 상태가 되면 pane은 시각적으로 강조되어야 한다.
+
+FR-029
+- 기본 알림은 3회 이내의 부드러운 깜빡임이다.
+
+FR-030
+- 사용자가 pane을 클릭하거나 해당 pane에 포커스하면 unread가 해제되어야 한다.
+
+FR-031
+- unread 해제 전까지 Ready Queue에 남아 있어야 한다.
+
+FR-032
+- 깜빡임은 설정에서 끌 수 있어야 한다.
+
+FR-033
+- 선택적으로 소리 알림, OS 알림을 켤 수 있어야 한다.
+
+8.6 Ready Queue
+
+FR-034
+- 앱은 completed-unread pane만 모아서 보여 주는 Ready Queue를 가져야 한다.
+
+FR-035
+- Ready Queue는 완료 시각 순 또는 최신순 정렬이 가능해야 한다.
+
+FR-036
+- Ready Queue 클릭 시 해당 pane 포커스로 이동해야 한다.
+
+FR-037
+- Ready Queue에서 dismiss / mark as read를 지원해야 한다.
+
+FR-038
+- Ready Queue는 최소 다음 정보를 보여 준다.
+  - pane index
+  - projectName
+  - 상태
+  - 완료 시각
+  - nextAction 1줄
+
+8.7 확대 / 축소
+
+FR-039
+- 각 pane에는 확대 버튼이 있어야 한다.
+
+FR-040
+- 확대 시 선택 pane만 앱 창 전체를 차지해야 한다.
+
+FR-041
+- ESC 또는 축소 버튼으로 원래 그리드로 복귀해야 한다.
+
+FR-042
+- 확대 전후에 해당 pane의 스크롤/상태는 가능한 한 유지되어야 한다.
+
+8.8 Guide Panel
+
+FR-043
+- 각 pane에는 구조화된 Guide Panel이 있어야 한다.
+
+FR-044
+- 최소 필드:
+  - projectName
+  - objective
+  - currentStatus
+  - nextAction
+  - priority
+  - notes
+  - updatedAt
+
+FR-045
+- currentStatus는 자유 텍스트 또는 enum형으로 둘 수 있다.
+- 권장 enum:
+  - Waiting on AI
+  - Needs My Input
+  - In Review
+  - Blocked
+  - Done
+
+FR-046
+- priority는 최소 Low / Medium / High 중 하나로 저장해야 한다.
+
+FR-047
+- guide는 자동 저장되어야 한다.
+
+FR-048
+- pane이 좁으면 Guide Panel 대신 Compact Overlay로 축약 표시해야 한다.
+
+FR-049
+- projectName과 nextAction은 pane이 작아도 항상 빠르게 볼 수 있어야 한다.
+
+FR-050
+- 자동 제안 기능은 보조 기능이며, 수동 입력값을 덮어쓰면 안 된다.
+
+8.9 단축키
+
+FR-051
+- 최소 단축키:
+  - Ctrl/Cmd + 1..9: pane 포커스
+  - Enter 또는 F: 활성 pane 확대
+  - ESC: 그리드 복귀
+  - Ctrl/Cmd + R: 활성 pane 새로고침
+  - Ctrl/Cmd + Shift + G: Guide Panel 토글
+  - Ctrl/Cmd + Shift + Q: Ready Queue 포커스
+  - Ctrl/Cmd + Shift + S: preset 저장
+
+8.10 드래그 재배치 (후순위이지만 구조 반영)
+
+FR-052
+- v1.1 UI에서 실제 구현하지 않더라도 pane order를 재배치할 수 있는 데이터 구조를 갖춰야 한다.
+
+FR-053
+- pane은 index 기반 렌더링이 아니라 order 배열 기반 렌더링을 사용한다.
+
+8.11 장애 처리
+
+FR-054
+- 로그인 만료 시 login-required 상태를 표시해야 한다.
+
+FR-055
+- load failure, crash, selector failure는 pane 단위 오류로 처리해야 한다.
+
+FR-056
+- 한 pane의 실패가 앱 전체 크래시로 이어지면 안 된다.
+
+======================================================================
+9. 외부 모니터링 / 메모리 연동 요구사항
+======================================================================
+
+9.1 공통 정책
+
+FR-057
+- 앱은 MonitoringSink 인터페이스를 통해 이벤트를 외부로 전송할 수 있어야 한다.
+
+FR-058
+- 외부 전송은 설정에서 opt-in 해야 한다.
+
+FR-059
+- 기본 전송 데이터는 메타데이터만 포함한다.
+- 본문 텍스트, 프롬프트, 응답 일부는 기본적으로 전송하지 않는다.
+
+FR-060
+- 민감 데이터 포함 전송은 별도 설정으로 명시적 허용을 받아야 한다.
+
+FR-061
+- 외부 전송 실패가 앱 UX를 막아서는 안 된다.
+- 실패 시 LocalSink만 계속 유지하면 된다.
+
+9.2 PostHogSink
+
+FR-062
+- PostHogSink는 pane lifecycle / UX event를 전송해야 한다.
+
+FR-063
+- 전송 대상 예:
+  - workspace_opened
+  - workspace_restored
+  - pane_created
+  - pane_generating_started
+  - pane_completed
+  - pane_marked_read
+  - pane_slow
+  - pane_stalled
+  - pane_error
+  - guide_updated
+  - preset_saved
+  - preset_applied
+  - pane_expanded
+  - pane_collapsed
+
+FR-064
+- 전송 payload에는 최소 다음이 포함된다.
+  - workspaceId
+  - paneId
+  - paneIndex
+  - timestamp
+  - status
+  - provider=chatgpt
+  - durationMs(optional)
+  - projectNameHash(optional)
+  - priority(optional)
+
+9.3 ZepMemorySink
+
+FR-065
+- ZepMemorySink는 고빈도 실시간 이벤트를 전부 보내기보다는 중요 이벤트만 저장한다.
+
+FR-066
+- 저장 대상 예:
+  - guide_updated
+  - project_renamed
+  - next_action_changed
+  - pane_completed_summary
+  - workspace_snapshot_saved
+
+FR-067
+- Zep 전송 포맷은 JSON episode를 우선 사용한다.
+
+FR-068
+- created_at에는 원래 이벤트 발생 시각을 넣어야 한다.
+
+FR-069
+- 동일 workspace에 너무 많은 고빈도 이벤트를 무제한 적재하지 않도록 debounce/batch 전략이 필요하다.
+
+9.4 LangfuseSink (인터페이스 우선)
+
+FR-070
+- LangfuseSink는 pane lifecycle을 trace/span 형태로 매핑할 수 있어야 한다.
+
+FR-071
+- v1.1에서 필수 구현은 아니다.
+- 단, event schema는 Langfuse에 매핑 가능한 구조로 설계한다.
+
+======================================================================
+10. 상태 머신 정의
+======================================================================
+
+Pane 상태 전이
+
+idle -> loading
+- 최초 navigation 시작
+
+loading -> idle
+- 페이지 로드 완료, 아직 생성 중 아님
+
+idle -> generating
+- 메시지 전송 감지 또는 stop 버튼 등장 또는 답변 스트림 변화 감지
+
+generating -> slow
+- generating duration > slowThresholdMs
+
+slow -> generating
+- 이벤트는 지속 상태가 아니라 플래그로도 구현 가능
+
+generating/slow -> stalled
+- heartbeat 중단 또는 duration > stalledThresholdMs
+
+generating/slow/stalled -> completed
+- stop 버튼 사라짐 + 텍스트 변화 안정화 + debounce 통과
+
+completed -> completed-unread
+- 완료 시점에 pane이 비활성/비포커스 상태
+
+completed-unread -> idle
+- 사용자 포커스 또는 mark as read
+
+any -> login-required
+- 로그인 화면 감지
+
+any -> error
+- crash / load failure / observer failure
+
+any -> unknown
+- 감지 불확실성 발생
+
+비고
+- 구현 단순화를 위해 slow/stalled/unknown은 status + flags 형태로 분리해도 된다.
+
+======================================================================
+11. 데이터 모델
+======================================================================
+
+AppSettings
+{
+  preferredPaneCount: number;
+  preferExternalMonitor: boolean;
+  alwaysOnTop: boolean;
+  blinkEnabled: boolean;
+  blinkCycles: number;
+  readyQueueEnabled: boolean;
+  soundEnabled: boolean;
+  desktopNotificationEnabled: boolean;
+  autoRestoreWorkspace: boolean;
+  compactOverlayEnabled: boolean;
+  telemetryOptIn: boolean;
+  includeSensitiveTextInTelemetry: boolean;
+  monitorProvider: 'local' | 'posthog' | 'langfuse' | 'zep-memory' | 'composite';
+  monitorConfig?: MonitoringConfig;
+  debugMode: boolean;
+}
+
+MonitoringConfig
+{
+  posthog?: {
+    apiKey: string;
+    host: string;
+    projectId?: string;
+    enabled: boolean;
+  };
+  zep?: {
+    apiKey: string;
+    baseUrl: string;
+    userId: string;
+    graphId?: string;
+    enabled: boolean;
+  };
+  langfuse?: {
+    publicKey: string;
+    secretKey: string;
+    baseUrl: string;
+    enabled: boolean;
+  };
+}
+
+Workspace
+{
+  id: string;
+  name: string;
+  paneCount: number;
+  order: string[];
+  monitorId?: string;
+  windowBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+  panes: PaneState[];
+}
+
+PaneState
+{
+  id: string;
+  index: number;
+  order: number;
+  url: string;
+  title: string;
+  provider: 'chatgpt';
+  status: 'idle' | 'loading' | 'generating' | 'completed' | 'completed-unread' | 'slow' | 'stalled' | 'login-required' | 'error' | 'unknown';
+  unread: boolean;
+  isExpanded: boolean;
+  lastCompletedAt?: string;
+  lastReadAt?: string;
+  lastGeneratingStartedAt?: string;
+  lastHeartbeatAt?: string;
+  metrics?: {
+    currentGenerationMs?: number;
+    lastGenerationMs?: number;
+  };
+  guide: PaneGuide;
+  diagnostics?: PaneDiagnostics;
+}
+
+PaneGuide
+{
+  projectName: string;
+  objective: string;
+  currentStatus: 'Waiting on AI' | 'Needs My Input' | 'In Review' | 'Blocked' | 'Done' | string;
+  nextAction: string;
+  priority: 'Low' | 'Medium' | 'High';
+  notes: string;
+  updatedAt: string;
+  autoSummary?: string;
+  manualOverride: boolean;
+}
+
+PaneDiagnostics
+{
+  adapterId?: string;
+  selectorVersion?: string;
+  lastError?: string;
+  lastSnapshotHash?: string;
+  recentEvents?: string[];
+}
+
+WorkspacePreset
+{
+  id: string;
+  name: string;
+  paneCount: number;
+  paneTemplates: Array<{
+    url?: string;
+    guide?: Partial<PaneGuide>;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+ReadyQueueItem
+{
+  paneId: string;
+  paneIndex: number;
+  projectName: string;
+  nextAction: string;
+  completedAt: string;
+  priority: 'Low' | 'Medium' | 'High';
+}
+
+======================================================================
+12. 이벤트 스키마
+======================================================================
+
+공통 이벤트 구조
+
+PaneEvent
+{
+  id: string;
+  type: string;
+  timestamp: string;
+  workspaceId: string;
+  paneId?: string;
+  paneIndex?: number;
+  provider?: 'chatgpt';
+  payload?: Record<string, unknown>;
+}
+
+핵심 이벤트 목록
+- workspace_opened
+- workspace_restored
+- workspace_saved
+- preset_saved
+- preset_applied
+- pane_created
+- pane_navigated
+- pane_generating_started
+- pane_output_progressed
+- pane_completed
+- pane_completed_unread
+- pane_marked_read
+- pane_slow
+- pane_stalled
+- pane_error
+- pane_login_required
+- pane_expanded
+- pane_collapsed
+- guide_updated
+- project_name_changed
+- next_action_changed
+
+이벤트 전송 규칙
+- 동일 이벤트 연속 발생 시 debounce 또는 batch 처리
+- pane_output_progressed 같은 고빈도 이벤트는 외부 sink에 직접 전송하지 않고 로컬 디버그용으로만 둘 수 있다
+- 외부 sink에는 의미 있는 milestone 이벤트만 전송한다
+
+======================================================================
+13. 사이트 어댑터 설계
+======================================================================
+
+목적
+- ChatGPT DOM 구조가 바뀌더라도 감지 로직 전체를 갈아엎지 않도록 한다.
+
+SiteAdapter
+- id: string
+- match(url): boolean
+- getTitle(document): string
+- isLoginRequired(document): boolean
+- isGenerating(document): boolean
+- getLatestAssistantMessageText(document): string
+- getConversationSummary(document): Partial<PaneGuide>
+- getDebugSnapshot(document): object
+
+ChatGPTAdapter 초기 규칙
+- 페이지 title 또는 대화 헤더에서 제목 후보 추출
+- stop 버튼 또는 이에 준하는 generating signal 존재 여부 확인
+- 최신 assistant 응답 텍스트 길이/해시 변화 감지
+- 로그인 화면 감지
+- heartbeat 주기적으로 송신
+
+selector 설계 원칙
+- selector는 배열로 관리
+- 우선순위 순으로 fallback
+- selector 버전을 기록
+- diagnostics에서 최근 매칭 성공/실패 내역을 볼 수 있게 한다
+
+======================================================================
+14. 아키텍처 상세
+======================================================================
+
+14.1 프로세스 구조
+
+Electron Main Process
+- BrowserWindow 생성
+- 모니터 탐지
+- WebContentsView 생성/파괴
+- 각 pane bounds 계산 및 적용
+- session/partition 관리
+- IPC 라우팅
+- sink 전송 orchestration
+
+Renderer Process (React HUD)
+- Top Bar
+- Ready Queue
+- Guide Panel
+- Settings / Presets / Diagnostics
+- 상태 표시
+- 단축키 처리
+- bounds 계산 요청
+
+Pane Preload Script
+- DOM observer
+- adapter 실행
+- 상태/제목/요약/heartbeat 이벤트 송신
+
+Persistence Layer
+- settings
+- workspace
+- presets
+- optional event cache
+
+Sink Layer
+- LocalSink
+- PostHogSink
+- ZepMemorySink
+- LangfuseSink
+- CompositeSink
+
+14.2 View 배치 원칙
+
+- BrowserWindow는 앱 shell을 렌더링한다.
+- 각 pane content는 Main Process가 만든 WebContentsView이다.
+- HUD는 BrowserWindow의 React 레이어가 맡는다.
+- Guide Panel이 열리면 해당 pane content bounds를 줄여서 우측에 패널 공간을 만든다.
+- Expanded pane 상태에서는 선택 pane view만 크게 보이고 나머지는 숨긴다.
+
+14.3 저장 정책
+
+- Guide Panel 입력은 500ms debounce 저장
+- pane status 변경은 milestone 기준 저장
+- workspace snapshot은 중요 이벤트마다 저장
+- preset 저장은 명시적 사용자 액션으로만 수행
+
+======================================================================
+15. UX 상세 규칙
+======================================================================
+
+초기 화면
+- "동시에 몇 개의 GPT 화면을 사용할까요?"
+- 빠른 선택: 1 / 2 / 4 / 6 / 9
+- 마지막 workspace 복원
+- preset 선택
+
+Ready Queue UX
+- 항상 보이게 하거나 접을 수 있어야 한다
+- 기본은 우측 상단 또는 좌측 사이드바
+- unread pane이 0개면 비어 있음 상태 표시
+
+알림 UX
+- 흰색 플래시 금지
+- 테두리, 헤더, 얕은 배경 강조 위주
+- 너무 빠른 점멸 금지
+- unread 강조는 깜빡임 이후에도 badge/outline로 남아 있어야 함
+
+Guide Panel UX
+- 기본 폭 280~320px
+- pane 폭이 좁으면 compact overlay로 자동 전환
+- projectName / nextAction / priority를 최우선 노출
+
+상태 색 정책
+- generating: 진행감이 있는 subtle animation
+- completed-unread: 강조
+- slow: 경고 수준
+- stalled: 강한 경고
+- error: 에러
+- login-required: 주의
+
+======================================================================
+16. 비기능 요구사항 (NFR)
+======================================================================
+
+NFR-001 성능
+- 4 pane 기준 부드럽게 상호작용 가능해야 한다.
+- 6 pane 이상부터는 성능 저하 가능성을 안내해야 한다.
+
+NFR-002 안정성
+- pane 단위 실패 격리
+- sink 전송 실패가 UI를 막지 않음
+
+NFR-003 보안
+- preload bridge 최소 권한
+- 민감 토큰/비밀번호 로컬 저장 금지
+- 외부 전송 데이터 최소화
+
+NFR-004 개인정보
+- guide, 메모는 기본 로컬 저장
+- 외부 전송은 opt-in
+- 텍스트 본문 전송은 기본 off
+
+NFR-005 확장성
+- provider adapter / sink adapter / session strategy를 분리한다
+
+NFR-006 접근성
+- 깜빡임 비활성화 가능
+- 키보드 조작 가능
+- 배지/텍스트 이중 표현
+
+NFR-007 복원력
+- 비정상 종료 후 최대한 복원
+- 외부 모니터 미연결 시 안전 fallback
+
+======================================================================
+17. 수용 기준 (Acceptance Criteria)
+======================================================================
+
+AC-001
+Given 외부 모니터가 연결된 상태에서 앱을 실행했을 때
+When 앱이 시작되면
+Then 앱 창은 외부 모니터에 열려야 한다.
+
+AC-002
+Given 사용자가 pane 수로 4를 입력했을 때
+When workspace가 생성되면
+Then 4개의 pane이 보여야 한다.
+
+AC-003
+Given pane이 generating 상태에서 응답을 마쳤을 때
+When 완료가 감지되면
+Then 상태는 completed 또는 completed-unread가 되어야 한다.
+And pane이 비활성 상태였다면 Ready Queue에 추가되어야 한다.
+
+AC-004
+Given completed-unread pane이 존재할 때
+When 사용자가 해당 pane을 클릭하거나 Ready Queue에서 선택하면
+Then unread가 해제되어야 한다.
+
+AC-005
+Given 사용자가 Guide Panel에 projectName과 nextAction을 입력했을 때
+When 앱을 재시작하면
+Then 값이 그대로 복원되어야 한다.
+
+AC-006
+Given 사용자가 preset을 저장했을 때
+When preset을 다시 적용하면
+Then pane 구성과 가이드 정보가 복원되어야 한다.
+
+AC-007
+Given PostHogSink가 활성화되어 있을 때
+When pane_completed 이벤트가 발생하면
+Then 외부 sink에 milestone event가 전송되어야 한다.
+
+AC-008
+Given ZepMemorySink가 활성화되어 있을 때
+When guide가 변경되면
+Then debounce 이후 JSON 이벤트가 저장되어야 한다.
+
+======================================================================
+18. 구현 우선순위
+======================================================================
+
+Phase 1
+- Electron shell
+- 외부 모니터 감지
+- workspace/preset 로컬 저장
+- React HUD
+- WebContentsView grid
+
+Phase 2
+- ChatGPTAdapter
+- generating/completed 감지
+- unread / blink / Ready Queue
+
+Phase 3
+- Guide Panel 구조화
+- preset 저장/불러오기
+- 단축키
+- diagnostics
+
+Phase 4
+- MonitoringSink
+- LocalSink
+- PostHogSink
+- ZepMemorySink(optional)
+
+Phase 5
+- slow/stalled 고도화
+- LangfuseSink(optional)
+- 자동 요약 보조
+- drag reorder
+
+v1.1 완료 기준
+- Phase 1~4 완료
+- Ready Queue 동작
+- completed-unread 유지
+- preset 동작
+- Local + PostHog 연동
+- Optional Zep 연동 동작
+
+======================================================================
+19. Copilot에게 전달할 구현 원칙
+======================================================================
+
+1) TypeScript 기준으로 작성한다.
+2) Electron Main / Renderer / Preload / Sink를 명확히 분리한다.
+3) 외부 페이지 임베딩은 WebContentsView 기준으로 구현한다.
+4) 상태 감지 로직은 SiteAdapter로 분리한다.
+5) 모니터링 전송 로직은 MonitoringSink 인터페이스 뒤에 숨긴다.
+6) 민감 텍스트는 기본 전송하지 않는다.
+7) 수동 입력값은 자동 추론이 덮어쓰지 못하게 한다.
+8) Ready Queue와 unread 상태를 핵심 UX로 취급한다.
+9) pane 단위 오류를 격리한다.
+10) Zep은 메인 모니터링보다 메모리/맥락 저장 용도로 연결한다.
+
+======================================================================
+20. Copilot 시작 프롬프트 예시
+======================================================================
+
+다음 요구사항의 Electron + React + TypeScript 데스크톱 앱을 만들어라.
+
+- 앱은 외부 모니터가 있으면 그 모니터에 열린다.
+- 사용자가 입력한 숫자(1~9)만큼 pane을 만든다.
+- 각 pane의 실제 웹 콘텐츠는 WebContentsView로 렌더링한다.
+- BrowserWindow의 React HUD는 pane header, Ready Queue, Guide Panel, Settings를 렌더링한다.
+- 각 pane은 ChatGPT를 연다.
+- preload script에서 ChatGPT DOM을 감시해 generating/completed 상태를 추정한다.
+- 완료되었지만 아직 읽지 않은 pane은 completed-unread 상태로 두고 Ready Queue에 넣는다.
+- completed-unread pane은 부드럽게 깜빡이고, 사용자가 클릭하면 unread가 해제된다.
+- 각 pane에는 projectName, objective, currentStatus, nextAction, priority, notes를 저장하는 Guide Panel이 있다.
+- workspace와 preset은 로컬 저장/복원한다.
+- 구조는 SiteAdapter와 MonitoringSink로 분리한다.
+- MonitoringSink는 최소 LocalSink와 PostHogSink를 구현한다.
+- ZepMemorySink는 옵션 구현으로, guide_updated와 pane_completed_summary를 JSON 이벤트로 저장한다.
+- 외부 전송은 opt-in이며, 텍스트 본문 전송은 기본적으로 꺼 둔다.
+- 먼저 동작 가능한 v1.1 MVP를 만들고, LangfuseSink는 TODO 또는 인터페이스 수준으로 남겨라.
+
+======================================================================
+21. 최종 판단
+======================================================================
+
+이 제품의 v1.1 핵심은 아래 6가지다.
+1) 멀티 pane 표시
+2) 완료 감지
+3) completed-unread 유지
+4) Ready Queue
+5) 프로젝트명/다음 액션 유지
+6) 외부 모니터링/기억 백엔드 연동
+
+정리
+- 모니터링 감지는 내부에서 직접 한다.
+- 외부 툴은 그 결과를 받아 저장/분석한다.
+- 기본 외부 백엔드는 PostHog를 추천한다.
+- Zep은 맥락 저장/이력 기억 용도로 붙인다.
+- Langfuse는 향후 API 모드에서 강해진다.
+
+이 원칙대로 가면, 이 앱은 단순한 창 분할기가 아니라 "AI 작업 관제판"으로 발전할 수 있다.

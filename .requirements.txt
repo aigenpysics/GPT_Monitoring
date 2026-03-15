@@ -1,0 +1,13 @@
+# GPT_Monitoring Python requirements (Workpack v1.2 PostHog sync)
+#
+# This repository is Electron + React + TypeScript first.
+# Runtime requirements from the workpack are installed via npm in package.json
+# (for example: electron, react, zustand, uuid, posthog-node).
+#
+# Mandatory Python packages: none
+#
+# Optional helper packages for local tooling scripts only:
+# requests==2.32.3
+# beautifulsoup4==4.12.3
+# lxml==5.2.2
+# python-dotenv==1.0.1

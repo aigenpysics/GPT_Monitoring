@@ -1,0 +1,1367 @@
+PRD: GPT 멀티 워크 모니터링 대시보드 (PostHog Edition)
+문서 버전: v1.2
+작성일: 2026-03-15
+문서 목적:
+- GitHub Copilot이 바로 구현을 시작할 수 있을 정도로 구체적인 제품 요구사항을 제공한다.
+- 외부 모니터링 백엔드를 PostHog 중심으로 고정한다.
+- "앱 내부 감지 + PostHog 원격 수집/분석/원격설정" 구조를 명확히 정의한다.
+
+======================================================================
+0. v1.2 변경 요약
+======================================================================
+
+v1.2에서 추가/수정된 핵심 사항
+- 외부 모니터링 전략을 PostHog First로 고정했다.
+- Zep/Langfuse는 v1.2 핵심 범위에서 제거하고, 향후 확장 옵션으로만 남겼다.
+- MonitoringSink 추상화는 유지하되, 실제 기본 구현 목표를 LocalSink + PostHogSink 2개로 단순화했다.
+- PostHog 연동 방식을 두 가지로 정의했다.
+  1) 기본: Electron Main Process에서 posthog-node SDK 사용
+  2) 대체: PostHog HTTP Capture API(/i/v0/e, /batch) 직접 호출
+- PostHog 자동수집(autocapture)을 기본 전략에서 제외했다.
+- 대신 앱이 통제하는 커스텀 이벤트만 PostHog로 보낸다.
+- 개인정보 보호 기본값을 강화했다.
+  - 원격 전송은 opt-in
+  - 원문 프롬프트/응답/DOM 텍스트는 기본 미전송
+  - 기본 전송은 메타데이터와 해시값 중심
+  - person profile 생성 방지는 기본 정책
+- PostHog distinct_id, flush/shutdown, feature flag, 원격 설정, 대시보드 정의를 추가했다.
+- GitHub Copilot용 별도 작업 문서(COPILOT_WORKPACK)를 함께 제공하는 전제를 문서에 반영했다.
+
+======================================================================
+1. 제품 개요
+======================================================================
+
+제품명(가칭)
+- GPT Monitor Wall
+- AI Work Control Tower
+- Multi-GPT Ops Dashboard
+
+문제 정의
+- 사용자는 여러 개의 GPT 대화창을 동시에 켜 놓고 병렬 작업한다.
+- 하지만 현재는 브라우저 탭/창을 계속 오가야 해서 시간 낭비가 크다.
+- 어떤 대화가 아직 생성 중인지, 어떤 대화가 이미 끝났는지 즉시 파악하기 어렵다.
+- 각 대화가 어떤 프로젝트인지, 다음에 무엇을 해야 하는지도 쉽게 잊어버린다.
+- 브라우저 타일링만으로는 이 문제가 풀리지 않는다.
+- 핵심은 "상태 인지"와 "다음 액션 유지"다.
+
+제품 비전
+- 두 번째 모니터를 AI 작업용 관제판으로 바꾼다.
+- 사용자가 지정한 수만큼 ChatGPT 화면을 분할해서 동시에 표시한다.
+- 각 pane의 상태를 실시간으로 감지한다.
+- 완료된 pane만 빠르게 다시 보게 해 준다.
+- 각 pane마다 프로젝트 맥락과 다음 액션을 붙여서 작업 끊김을 최소화한다.
+- 그 과정에서 앱 내부 이벤트를 PostHog로 전송해 제품 분석, 품질 모니터링, 원격 설정을 가능하게 한다.
+
+핵심 가치
+- 컨텍스트 스위칭 감소
+- 응답 완료 인지 시간 단축
+- 병렬 작업 처리량 증가
+- 프로젝트 맥락 유지
+- 완료된 pane의 미확인 상태 유지
+- 제품 운영 데이터 확보 (PostHog 기반)
+
+제품 본질 정의
+- 이 앱의 본질은 "GPT 여러 개 보기"가 아니다.
+- 이 앱의 본질은 "여러 AI 작업의 상태를 모니터링하고, 완료/미확인/다음 액션을 관리하는 것"이다.
+
+대상 사용자
+- 동시에 여러 GPT 대화를 돌리는 파워 유저
+- 기획/개발/리서치/문서 작업을 병렬로 수행하는 사용자
+- 듀얼 모니터 이상 환경 사용자
+- 단순 브라우저 탭 정리가 아니라 "작업 상태"를 관리하고 싶은 사용자
+
+MVP 범위 (v1.2)
+- 1차 구현은 ChatGPT 웹앱 모니터링에 집중한다.
+- 구조는 확장 가능하게 설계하되, Claude/Gemini 등 타 서비스 지원은 후속 버전으로 미룬다.
+- 외부 모니터링 백엔드는 PostHog 하나만 우선 지원한다.
+- Zep/Langfuse/Helicone은 코어 구현 대상이 아니다.
+
+비범위 (Out of Scope) - v1.2
+- 모바일 앱
+- 팀 협업
+- 자동 프롬프트 전송/자동 답변 제출
+- 다중 AI 서비스 공식 지원
+- 완전한 클라우드 동기화 제품화
+- 고급 자동 요약/자동 next action 추론
+- Session Replay 기본 활성화
+- embedded ChatGPT DOM 전체를 외부 툴에 보내는 기능
+
+======================================================================
+2. 제품 전략 및 핵심 판단
+======================================================================
+
+전략 A: 답변 완료 모니터
+- generating / completed / completed-unread 상태를 정확히 보여 준다.
+- Ready Queue로 완료된 pane만 빠르게 확인한다.
+
+전략 B: AI 작업 관제판
+- 각 pane에 프로젝트명, 목적, 현재 상태, 다음 액션, 우선순위를 붙인다.
+- 사용자는 "무엇을 기다리는지"와 "다음에 무엇을 할지"를 동시에 본다.
+
+전략 C: 제품 관측성 확보
+- 앱 내부 이벤트를 PostHog에 전송해 실제 사용 패턴과 실패 패턴을 측정한다.
+- 어떤 알림 방식이 효과적인지, 어떤 상태 감지가 자주 실패하는지 데이터로 본다.
+- 원격 설정과 점진 배포를 지원한다.
+
+최종 전략
+- v1.2는 A + B + C를 모두 포함한다.
+- 사용자용 제품 기능은 "정확한 상태 감지 + 가벼운 맥락 유지"가 중심이다.
+- 개발/운영용 기능은 "정제된 커스텀 이벤트 + PostHog 기반 분석"이 중심이다.
+
+아키텍처 원칙
+1) 상태 감지 로직은 앱 내부에서 직접 수행한다.
+2) 외부 툴은 감지 자체가 아니라 이벤트 수집/분석/원격설정 용도로 쓴다.
+3) 감지 로직은 SiteAdapter로 분리한다.
+4) 원격 전송 로직은 TelemetryGateway 뒤에 숨긴다.
+5) 사용자 데이터는 Local First 저장이 기본이다.
+6) PostHog에는 필요한 메타데이터만 보낸다.
+7) 민감 텍스트는 기본적으로 절대 보내지 않는다.
+8) ChatGPT 내부 클릭/타이핑 autocapture는 하지 않는다.
+9) 벤더 SDK는 Main Process에 집중시켜 보안/운영 복잡도를 낮춘다.
+
+======================================================================
+3. 기술 방향의 핵심 결론
+======================================================================
+
+핵심 결론 1
+- "ChatGPT 웹 화면이 지금 generating인지 completed인지"를 알기 위해서는 앱이 pane 내부 페이지 상태를 직접 감지해야 한다.
+- 따라서 PostHog만 붙여서는 문제를 해결할 수 없다.
+- 감지는 앱 내부, 저장/분석은 PostHog가 담당한다.
+
+핵심 결론 2
+- v1.2의 외부 백엔드는 PostHog 하나로 고정한다.
+- 이유는 이 제품의 핵심 데이터가 pane lifecycle / UX / notification / guide update 같은 커스텀 이벤트이기 때문이다.
+- 이는 제품 분석 도구가 가장 잘 다룬다.
+
+핵심 결론 3
+- Electron 앱에서는 TelemetryService를 Main Process에 두는 것이 가장 관리하기 쉽다.
+- Pane observer, renderer UI, settings 화면 등 여러 프로세스에서 발생한 이벤트를 Main Process로 모은 뒤 PostHog로 전송한다.
+
+핵심 결론 4
+- PostHog 연동은 SDK 우선, API 직접 호출은 fallback으로 정의한다.
+- 즉, 설계상 Transport는 추상화하되 실제 구현은 posthog-node SDK가 기본이다.
+
+======================================================================
+4. 왜 PostHog인가
+======================================================================
+
+채택 이유
+- 이 제품이 수집해야 하는 데이터는 로그형/이벤트형 데이터다.
+- 예:
+  - pane generating 시작
+  - pane completed
+  - pane marked read
+  - pane slow/stalled/error
+  - guide updated
+  - preset applied
+  - pane expanded
+  - settings changed
+- PostHog는 이런 이벤트를 수집하고 분석하는 데 적합하다.
+- 제품 분석, 퍼널, 전환, 분포, 속성 기반 필터링, 대시보드 구성에 강하다.
+- 추후 feature flags를 이용해 blink 강도, threshold, 실험 기능 rollout도 가능하다.
+- Cloud, EU, self-hosted 구조를 모두 지원하므로 배포 선택지가 넓다.
+
+기각한 선택지의 이유
+- Zep:
+  - 메모리/맥락 저장에는 맞을 수 있으나, 실시간 pane lifecycle 이벤트를 메인 분석 백엔드로 다루기에는 결이 다르다.
+- Langfuse:
+  - API 호출 기반 LLM trace에는 강하나, 지금 단계의 핵심은 ChatGPT 웹 UI 상태 모니터링이다.
+- Helicone:
+  - API gateway/LLM gateway 쪽 강점은 있지만 웹 UI 상태 감시 중심의 v1.2와는 맞지 않는다.
+
+======================================================================
+5. PostHog 기반 아키텍처
+======================================================================
+
+5.1 최상위 구조
+
+[Renderer HUD]
+- Ready Queue
+- Guide Panel
+- Settings
+- Pane Header Overlay
+
+[Main Process]
+- PaneManager
+- WebContentsView 관리
+- Session/Profile 분리
+- IPC Router
+- WorkspaceService
+- TelemetryService
+- LocalEventQueue
+- SettingsService
+- Monitor/WindowService
+
+[Preload / Observer]
+- ChatGPT DOM 상태 감시
+- DOM -> Domain Event 변환
+- debounce / confidence scoring
+- observer heartbeat
+
+[PostHog]
+- 이벤트 수집
+- 대시보드/인사이트
+- feature flags / remote config
+- 장애/품질 분석
+
+5.2 이벤트 흐름
+
+1) preload observer가 상태 변화를 감지한다.
+2) preload는 내부 도메인 이벤트를 IPC로 Main에 전달한다.
+3) Main의 PaneDomainService가 상태 전이를 검증한다.
+4) Main의 LocalStore가 현재 pane/workspace 상태를 저장한다.
+5) Main의 TelemetryService가 정제된 텔레메트리 이벤트를 생성한다.
+6) LocalEventQueue에 먼저 적재한다.
+7) PostHogSink가 배치 전송한다.
+8) 전송 성공 시 queue에서 삭제한다.
+9) 실패 시 exponential backoff 후 재시도한다.
+
+5.3 왜 Main Process 중심인가
+- API 토큰/secure key를 renderer에 노출하지 않기 위해서
+- 여러 프로세스 이벤트를 하나의 distinct_id/context로 통합하기 위해서
+- 종료 직전 flush/shutdown을 보장하기 위해서
+- feature flag evaluation을 중앙에서 수행하기 위해서
+
+======================================================================
+6. 구현 기술 스택 권장안
+======================================================================
+
+권장 구현 형태
+- Electron 기반 데스크톱 앱
+- 프론트엔드: React + TypeScript
+- 상태 관리: Zustand
+- 검증: zod
+- 로컬 저장:
+  - 1순위: SQLite
+  - 2순위: electron-store (단순 저장만 필요할 경우)
+- 스타일: Tailwind CSS 또는 CSS Modules
+- 로깅: pino
+- 테스트: Vitest + Playwright(Electron E2E) 또는 electron-vite 테스트 구성
+
+중요 구현 선택
+- BrowserWindow는 앱 shell(HUD)을 렌더링한다.
+- 각 pane의 실제 ChatGPT 화면은 WebContentsView로 렌더링한다.
+- Renderer는 overlay UI와 guide 편집만 담당한다.
+- Main은 view 생성/배치/세션/observer IPC/telemetry를 담당한다.
+
+권장 패키지 예시
+- electron
+- react
+- typescript
+- zustand
+- zod
+- better-sqlite3 또는 sqlite 라이브러리
+- posthog-node
+- uuid
+- pino
+- vitest
+- playwright
+
+======================================================================
+7. 사용자 시나리오
+======================================================================
+
+시나리오 A: 첫 실행
+1) 사용자가 앱을 실행한다.
+2) 앱은 연결된 모니터를 감지한다.
+3) 외부 모니터가 있으면 해당 모니터에 창을 연다.
+4) 사용자가 pane 개수(예: 4)를 입력한다.
+5) 앱은 2x2 grid를 생성한다.
+6) 각 pane에는 ChatGPT 홈 또는 마지막 URL이 열린다.
+7) 앱은 workspace opened 이벤트를 로컬에 저장한다.
+8) 사용자가 telemetry opt-in을 켜면 PostHog에도 전송한다.
+
+시나리오 B: 생성 완료 감지
+1) pane 2가 generating 상태다.
+2) pane 4도 generating 상태다.
+3) pane 2의 응답이 먼저 끝난다.
+4) pane 2는 completed-unread가 된다.
+5) pane 2는 깜빡임/헤더 강조/배지 표시를 한다.
+6) Ready Queue에 pane 2가 추가된다.
+7) pane completed 이벤트가 PostHog에 전송된다.
+8) 사용자가 pane 2를 열면 pane marked read 이벤트가 전송된다.
+
+시나리오 C: 작업 맥락 유지
+1) pane 1에는 "신규 기능 PRD", pane 2에는 "인증 구조 검토"를 붙여 둔다.
+2) nextAction과 priority를 적어 둔다.
+3) 잠시 자리를 비웠다가 돌아온다.
+4) Ready Queue와 Guide Panel을 보고 즉시 재개한다.
+
+시나리오 D: preset 사용
+1) 사용자는 "개발 4분할", "리서치 6분할" 프리셋을 저장한다.
+2) 다음 실행 시 preset을 불러온다.
+3) pane 수, 레이아웃, guide, 마지막 URL이 복원된다.
+4) preset applied 이벤트가 PostHog에 전송된다.
+
+시나리오 E: 네트워크 장애
+1) 사용자가 telemetry opt-in 상태다.
+2) 인터넷이 일시적으로 끊긴다.
+3) 앱은 pane 상태 감지와 UI 동작을 계속 수행한다.
+4) TelemetryService는 이벤트를 로컬 큐에 쌓는다.
+5) 네트워크가 복구되면 PostHog로 재전송한다.
+6) 원격 전송 실패가 UX를 막아서는 안 된다.
+
+======================================================================
+8. 정보 구조 (IA)
+======================================================================
+
+앱 상단/좌측/우측 배치 예시는 자유롭게 바뀔 수 있다.
+하지만 정보 계층은 다음을 유지해야 한다.
+
+1) Grid 영역
+- 실제 ChatGPT pane들이 보이는 영역
+- 상태 표시와 unread 강조가 붙는다
+
+2) Ready Queue 영역
+- 완료되었지만 아직 읽지 않은 pane 목록
+- 최근 완료 순 또는 우선순위 순 정렬 가능
+
+3) Guide Panel 영역
+- 현재 선택 pane의 프로젝트 맥락
+- projectName
+- objective
+- currentStatus
+- nextAction
+- priority
+- notes
+
+4) Settings / Telemetry 영역
+- pane 개수
+- 알림 방식
+- telemetry opt-in
+- PostHog host/token 설정
+- feature flag status
+- debug mode
+
+======================================================================
+9. 핵심 기능 요구사항 (Functional Requirements)
+======================================================================
+
+9.1 워크스페이스 / 레이아웃
+
+FR-001
+- 앱은 사용자가 지정한 pane 수(1~9)를 지원해야 한다.
+
+FR-002
+- pane 수에 따라 자동 grid 레이아웃을 계산해야 한다.
+
+FR-003
+- 앱은 현재 workspace를 로컬에 저장해야 한다.
+
+FR-004
+- 앱은 마지막 workspace를 복원할 수 있어야 한다.
+
+FR-005
+- 사용자는 workspace preset을 저장/불러오기/삭제할 수 있어야 한다.
+
+9.2 두 번째 모니터
+
+FR-006
+- 연결된 디스플레이 목록을 감지할 수 있어야 한다.
+
+FR-007
+- 외부 모니터가 있을 경우 기본적으로 외부 모니터에 앱을 띄워야 한다.
+
+FR-008
+- 사용자는 설정에서 특정 모니터를 고를 수 있어야 한다.
+
+FR-009
+- 모니터가 제거되면 앱은 안전하게 기본 모니터로 복귀해야 한다.
+
+9.3 pane에 ChatGPT 표시
+
+FR-010
+- 각 pane은 독립 WebContentsView로 렌더링되어야 한다.
+
+FR-011
+- pane별 독립 세션/쿠키 전략을 지원해야 한다.
+- 최소 요구: 공용 세션
+- 권장 확장: pane별 세션 분리 옵션
+
+FR-012
+- pane은 ChatGPT URL로 이동할 수 있어야 한다.
+
+FR-013
+- pane별 마지막 URL을 복원할 수 있어야 한다.
+
+9.4 상태 감지
+
+FR-014
+- 앱은 ChatGPT pane의 generating 상태를 감지해야 한다.
+
+FR-015
+- 앱은 completed 상태를 감지해야 한다.
+
+FR-016
+- 앱은 completed-unread 상태를 별도로 유지해야 한다.
+
+FR-017
+- 앱은 slow / stalled / login-required / error / unknown 상태를 지원해야 한다.
+
+FR-018
+- 상태 감지는 여러 신호를 조합한 heuristic 기반이어야 한다.
+- 예:
+  - stop 버튼 존재 여부
+  - 응답 영역 텍스트 길이 변화
+  - DOM mutation 빈도
+  - idle debounce 통과 여부
+  - heartbeat 존재 여부
+
+FR-019
+- 상태 추정 실패 시 unknown으로 안전하게 폴백해야 한다.
+
+FR-020
+- observer 오류는 pane 전체를 죽이지 말고 해당 pane 단위로 격리해야 한다.
+
+9.5 완료 알림 및 unread 관리
+
+FR-021
+- pane이 completed 되었을 때 사용자가 해당 pane을 보고 있지 않으면 completed-unread가 되어야 한다.
+
+FR-022
+- completed-unread pane은 시각적으로 강조되어야 한다.
+- 기본 방식:
+  - 부드러운 깜빡임
+  - 헤더 강조
+  - unread 배지
+
+FR-023
+- 사용자가 pane을 클릭하거나 Ready Queue에서 열면 unread가 해제되어야 한다.
+
+FR-024
+- 알림 방식은 사용자 설정으로 변경 가능해야 한다.
+- blink
+- badge
+- desktop notification
+- sound
+- none
+
+9.6 Ready Queue
+
+FR-025
+- 완료되었지만 미확인인 pane 목록을 Ready Queue에 표시해야 한다.
+
+FR-026
+- Ready Queue는 pane 번호, 프로젝트명, 완료 시각, 우선순위를 보여 줘야 한다.
+
+FR-027
+- Ready Queue 항목 클릭 시 해당 pane을 포커스해야 한다.
+
+FR-028
+- Ready Queue는 workspace 전환/재시작 후에도 복원되어야 한다.
+
+9.7 확대 / 축소
+
+FR-029
+- 사용자는 pane을 전체화면 또는 단일 확대 상태로 볼 수 있어야 한다.
+
+FR-030
+- 축소 시 기존 grid 크기와 위치로 돌아가야 한다.
+
+FR-031
+- 확대/축소 상태는 telemetry 이벤트로 기록되어야 한다.
+
+9.8 Guide Panel
+
+FR-032
+- Guide Panel은 pane별로 별도 저장되어야 한다.
+
+FR-033
+- 최소 필드:
+  - projectName
+  - objective
+  - currentStatus
+  - nextAction
+  - priority
+  - notes
+
+FR-034
+- Guide Panel 편집은 자동 저장되어야 한다.
+
+FR-035
+- guide 변경은 debounce 후 저장해야 한다.
+
+FR-036
+- 수동 입력값은 자동 추론 기능이 생겨도 덮어쓰지 못하게 해야 한다.
+
+9.9 단축키
+
+FR-037
+- Alt+1~9 또는 Cmd/Ctrl 조합으로 pane 이동을 지원해야 한다.
+
+FR-038
+- Enter/Space로 선택 pane 확대를 지원해야 한다.
+
+FR-039
+- Esc로 축소를 지원해야 한다.
+
+FR-040
+- Guide Panel 편집 단축키를 지원해야 한다.
+
+9.10 slow / stalled 감지
+
+FR-041
+- generating 시간이 slowThresholdMs를 넘으면 slow 이벤트를 발생시켜야 한다.
+
+FR-042
+- stalledThresholdMs를 넘거나 heartbeat가 멈추면 stalled로 표시해야 한다.
+
+FR-043
+- threshold는 설정 또는 PostHog feature flag로 조절 가능해야 한다.
+
+9.11 Settings / Telemetry
+
+FR-044
+- 사용자는 telemetry opt-in을 켜고 끌 수 있어야 한다.
+
+FR-045
+- PostHog host / token / debug mode / feature flag 사용 여부를 설정할 수 있어야 한다.
+
+FR-046
+- 기본값은 telemetry off다.
+
+FR-047
+- opt-in 이전 이벤트는 원격 전송하지 않는다.
+- 단, 로컬 저장은 허용한다.
+
+FR-048
+- opt-in을 껐을 때는 PostHog 전송을 즉시 멈춰야 한다.
+
+======================================================================
+10. PostHog 연동 요구사항
+======================================================================
+
+10.1 기본 원칙
+
+FR-049
+- v1.2의 유일한 외부 모니터링 벤더는 PostHog다.
+
+FR-050
+- LocalSink는 항상 존재해야 한다.
+
+FR-051
+- PostHog 전송 실패가 사용자 UX를 방해하면 안 된다.
+
+FR-052
+- 전송 대상은 반드시 정제된 커스텀 이벤트여야 한다.
+
+FR-053
+- embedded ChatGPT view에 PostHog autocapture를 넣지 않는다.
+
+FR-054
+- ChatGPT의 원문 입력/응답/DOM 텍스트를 기본적으로 전송하지 않는다.
+
+10.2 구현 모드
+
+FR-055
+- 기본 전송 모드는 posthog-node SDK를 사용한다.
+
+FR-056
+- 대체 전송 모드로 HTTP Capture API를 지원할 수 있어야 한다.
+- 단, v1.2 필수 구현은 아니다.
+
+FR-057
+- SDK/API 사용 여부는 TelemetryTransport 인터페이스 뒤로 숨겨야 한다.
+
+10.3 Main Process TelemetryService
+
+FR-058
+- TelemetryService는 Main Process에 위치해야 한다.
+
+FR-059
+- Renderer, Preload, PaneManager에서 발생한 이벤트를 IPC로 받아야 한다.
+
+FR-060
+- TelemetryService는 원시 이벤트를 곧바로 보내지 않고 정규화한 뒤 전송해야 한다.
+
+FR-061
+- TelemetryService는 공통 속성을 자동 주입해야 한다.
+- 예:
+  - appVersion
+  - platform
+  - provider
+  - workspaceId
+  - paneId
+  - paneIndex
+  - monitorCount
+  - selectedMonitorId
+  - observerVersion
+  - adapterName
+
+10.4 distinct_id / identity 정책
+
+FR-062
+- 앱은 installationId를 최초 실행 시 생성하고 영구 보관해야 한다.
+
+FR-063
+- 기본 distinct_id는 installationId로 한다.
+
+FR-064
+- 기본 원격 이벤트는 personless/anonymous 성격으로 보내야 한다.
+
+FR-065
+- person profile 생성을 막기 위해 기본 이벤트에는 $process_person_profile=false 정책을 적용해야 한다.
+
+FR-066
+- 사용자 계정 기반 identify/alias/group은 v1.2 범위 밖이다.
+
+10.5 privacy 정책
+
+FR-067
+- 기본 전송 데이터는 메타데이터만 포함한다.
+
+FR-068
+- projectName, objective, notes 등의 자유 텍스트는 기본적으로 전송하지 않는다.
+
+FR-069
+- 필요 시 projectNameHash 정도만 전송할 수 있다.
+
+FR-070
+- "민감 텍스트 전송 허용" 설정이 켜져도, prompt/response 본문 전문 전송은 금지한다.
+
+FR-071
+- PostHog Session Replay는 v1.2에서 기본 비활성화한다.
+
+FR-072
+- GeoIP 기반 속성은 기본 비활성 상태를 유지한다.
+
+10.6 batching / retry / shutdown
+
+FR-073
+- 전송 전 이벤트는 로컬 큐에 적재해야 한다.
+
+FR-074
+- 큐는 최소 다음 메타데이터를 저장해야 한다.
+  - id
+  - eventName
+  - payloadJson
+  - createdAt
+  - retryCount
+  - nextRetryAt
+  - lastError
+
+FR-075
+- PostHog 전송 실패 시 exponential backoff로 재시도해야 한다.
+
+FR-076
+- 앱 종료 시 가능한 범위 내에서 queue flush와 client shutdown을 수행해야 한다.
+
+FR-077
+- pane completed, pane error 같은 핵심 이벤트는 필요 시 immediate 전송 전략을 사용할 수 있어야 한다.
+
+10.7 feature flags / remote config
+
+FR-078
+- PostHog feature flags는 Main Process에서만 평가해야 한다.
+
+FR-079
+- feature flag secure API key 또는 동등한 비밀 키는 renderer에 노출하면 안 된다.
+
+FR-080
+- feature flags는 원격 설정 용도로 사용한다.
+- 예:
+  - blink enabled
+  - blink cycles
+  - slow threshold
+  - stalled threshold
+  - observer v2 rollout
+  - guide panel experiment
+
+FR-081
+- feature flag 결과는 로컬 캐시할 수 있어야 한다.
+
+FR-082
+- remote config를 못 받아와도 앱은 로컬 기본값으로 정상 동작해야 한다.
+
+10.8 host/region 설정
+
+FR-083
+- PostHog host는 설정 가능해야 한다.
+- 예:
+  - US Cloud
+  - EU Cloud
+  - self-hosted
+
+FR-084
+- project token과 host는 별도 저장되어야 한다.
+
+FR-085
+- 잘못된 host/token 구성 시 사용자에게 비차단형 오류를 표시해야 한다.
+
+======================================================================
+11. PostHog 이벤트 전략
+======================================================================
+
+11.1 네이밍 정책
+
+내부 이벤트 enum
+- 대문자 또는 snake_case 사용 가능
+- 예:
+  - PANE_COMPLETED
+  - GUIDE_UPDATED
+  - PRESET_APPLIED
+
+PostHog 외부 이벤트명
+- object + verb 형태의 안정적인 이름을 사용한다.
+- 공백 기반 이름을 권장한다.
+- 예:
+  - workspace opened
+  - workspace restored
+  - pane created
+  - pane generating started
+  - pane completed
+  - pane marked read
+  - pane slow
+  - pane stalled
+  - pane error
+  - pane expanded
+  - pane collapsed
+  - guide updated
+  - preset saved
+  - preset applied
+  - settings updated
+  - telemetry opted in
+  - telemetry opted out
+
+11.2 핵심 이벤트 목록
+
+Lifecycle
+- app launched
+- workspace opened
+- workspace restored
+- pane created
+- pane navigated
+- pane generating started
+- pane slow
+- pane stalled
+- pane completed
+- pane marked read
+- pane error
+- pane login required
+- pane observer recovered
+
+Interaction
+- pane focused
+- pane expanded
+- pane collapsed
+- ready queue item opened
+- guide updated
+- guide field focused
+- preset saved
+- preset applied
+- preset deleted
+- settings updated
+
+Telemetry / Ops
+- telemetry opted in
+- telemetry opted out
+- telemetry delivery failed
+- feature flags refreshed
+- feature flags refresh failed
+- local queue drained
+- local queue retry scheduled
+
+11.3 공통 속성
+
+모든 이벤트 공통
+- app_version
+- app_channel
+- platform
+- provider = chatgpt
+- distinct_id = installationId
+- workspace_id
+- pane_id(optional)
+- pane_index(optional)
+- timestamp_client
+- telemetry_mode = local_only | local_plus_posthog
+- observer_version
+- adapter_name
+- selected_monitor_id
+- monitor_count
+- pane_count_total
+
+상태 이벤트 공통
+- status_from
+- status_to
+- duration_ms(optional)
+- detection_confidence(optional)
+- unread(optional)
+- is_expanded(optional)
+
+Guide 이벤트 공통
+- guide_field_names_changed
+- priority(optional)
+- has_next_action(boolean)
+- project_name_hash(optional)
+
+오류 이벤트 공통
+- error_code
+- error_scope
+- error_message_redacted
+- retry_count(optional)
+
+11.4 절대 전송 금지 데이터
+
+금지
+- ChatGPT 질문 본문 전문
+- ChatGPT 응답 본문 전문
+- clipboard 내용
+- notes 전체 원문
+- objective 전체 원문
+- 대화 DOM 전체 스냅샷
+- 쿠키/세션 정보
+- access token/API key/secret
+- 사용자가 붙여넣은 비밀 정보
+
+11.5 선택 전송 가능 데이터
+
+허용 가능
+- projectNameHash
+- objectiveLength
+- notesLength
+- messageCountEstimate
+- responseLengthEstimate
+- durationMs
+- 상태 전이 횟수
+- debounce 횟수
+- detectionConfidence
+
+======================================================================
+12. PostHog 대시보드 / 운영 관점 요구사항
+======================================================================
+
+12.1 기본 대시보드
+
+Dashboard A: pane lifecycle health
+- pane generating started 수
+- pane completed 수
+- pane slow/stalled 비율
+- pane completed까지의 latency p50/p95
+
+Dashboard B: notification effectiveness
+- pane completed -> pane marked read 전환율
+- pane completed -> pane marked read까지 걸린 시간
+- 알림 방식별( blink / desktop / sound ) 차이
+
+Dashboard C: workspace usage
+- pane_count 분포
+- preset applied 빈도
+- monitor_count 분포
+- expanded mode 사용률
+
+Dashboard D: product quality
+- pane error 빈도
+- pane login required 빈도
+- observer recovered 비율
+- telemetry delivery failed 추이
+
+12.2 운영 목적
+
+- 어떤 상태 감지 로직이 자주 실패하는지 확인
+- 알림이 실제로 읽음까지 이어지는지 확인
+- pane 수 증가가 완료 인지 속도에 어떤 영향을 주는지 확인
+- 어느 preset이 가장 유용한지 확인
+- slow/stalled 임계값이 적절한지 검증
+
+======================================================================
+13. 상태 머신 정의
+======================================================================
+
+Pane 상태 전이
+
+idle -> loading
+- 최초 navigation 시작
+
+loading -> idle
+- 페이지 로드 완료, 아직 생성 중 아님
+
+idle -> generating
+- stop 버튼 등장
+- 또는 응답 스트림 변화 감지
+- 또는 특정 전송/실행 UI 상태 감지
+
+generating -> slow
+- generating duration > slowThresholdMs
+
+slow -> generating
+- slow는 플래그이므로, 구현상 generating + slowFlag로 처리 가능
+
+generating/slow -> stalled
+- heartbeat 중단
+- 또는 duration > stalledThresholdMs
+
+generating/slow/stalled -> completed
+- stop 버튼 사라짐
+- DOM mutation 안정화
+- 텍스트 길이 변화 정지
+- debounce 통과
+
+completed -> completed-unread
+- 완료 시점에 pane이 비포커스/비활성 상태
+
+completed-unread -> idle
+- 사용자가 pane 확인
+- 또는 명시적 mark as read
+
+any -> login-required
+- 로그인 페이지 감지
+
+any -> error
+- load failure
+- observer crash
+- ipc timeout
+
+any -> unknown
+- 신뢰도 낮음
+- heuristic 충돌
+
+======================================================================
+14. 데이터 모델
+======================================================================
+
+AppSettings
+{
+  preferredPaneCount: number;
+  preferExternalMonitor: boolean;
+  selectedMonitorId?: string;
+  alwaysOnTop: boolean;
+  blinkEnabled: boolean;
+  blinkCycles: number;
+  soundEnabled: boolean;
+  desktopNotificationEnabled: boolean;
+  readyQueueEnabled: boolean;
+  autoRestoreWorkspace: boolean;
+  telemetryOptIn: boolean;
+  telemetryMode: 'local_only' | 'local_plus_posthog';
+  includeSensitiveTextInTelemetry: boolean;
+  debugMode: boolean;
+  posthog?: PostHogConfig;
+}
+
+PostHogConfig
+{
+  enabled: boolean;
+  mode: 'sdk-node' | 'http-api';
+  host: string;
+  projectToken: string;
+  secureApiKey?: string;
+  requestTimeoutMs: number;
+  flushAt: number;
+  flushIntervalMs: number;
+  useFeatureFlags: boolean;
+  featureFlagsPollingIntervalMs: number;
+  disableGeoip: boolean;
+}
+
+Workspace
+{
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  paneCount: number;
+  gridTemplate: string;
+  presetId?: string;
+  panes: PaneState[];
+  readyQueue: ReadyQueueItem[];
+}
+
+PaneState
+{
+  id: string;
+  index: number;
+  url: string;
+  provider: 'chatgpt';
+  status: 'idle' | 'loading' | 'generating' | 'slow' | 'stalled' | 'completed' | 'completed-unread' | 'login-required' | 'error' | 'unknown';
+  isExpanded: boolean;
+  unread: boolean;
+  lastStatusChangedAt: string;
+  generatingStartedAt?: string;
+  completedAt?: string;
+  lastFocusedAt?: string;
+  observerHeartbeatAt?: string;
+  detectionConfidence?: number;
+  errorCode?: string;
+  guide: GuideData;
+}
+
+GuideData
+{
+  projectName: string;
+  objective: string;
+  currentStatus: string;
+  nextAction: string;
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  notes: string;
+  updatedAt: string;
+}
+
+ReadyQueueItem
+{
+  paneId: string;
+  paneIndex: number;
+  projectName: string;
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  completedAt: string;
+}
+
+TelemetryQueueItem
+{
+  id: string;
+  eventName: string;
+  payloadJson: string;
+  createdAt: string;
+  retryCount: number;
+  nextRetryAt?: string;
+  lastError?: string;
+  sentAt?: string;
+}
+
+======================================================================
+15. 사이트 어댑터 설계
+======================================================================
+
+목표
+- ChatGPT 전용 감지 로직을 별도 adapter로 분리한다.
+- 추후 Claude/Gemini를 붙이더라도 공통 엔진은 유지한다.
+
+인터페이스 예시
+SiteAdapter
+- name(): string
+- matches(url: string): boolean
+- bootstrap(): Promise<void>
+- detectSignals(): AdapterSignals
+- mapSignalsToState(prevState, signals): PaneStateTransition
+- cleanup(): Promise<void>
+
+ChatGPTAdapter v1 추정 신호
+- stop button 존재
+- regenerate / continue / send button 상태
+- assistant response container 증가
+- DOM mutation rate
+- stream activity debounce
+- login screen markers
+
+원칙
+- selector 실패 시 안전하게 unknown으로 간다.
+- adapter 내부 예외는 pane 단위로 격리한다.
+- adapter version을 telemetry에 실어 어떤 버전이 불안정한지 본다.
+
+======================================================================
+16. 아키텍처 상세
+======================================================================
+
+16.1 프로세스 구조
+
+Main Process
+- BrowserWindow 생성
+- WebContentsView 생성/파괴
+- pane bounds 계산
+- session partition 관리
+- settings load/save
+- workspace load/save
+- TelemetryService
+- LocalEventQueue
+- IPC handlers
+
+Renderer Process
+- React UI
+- Ready Queue
+- Guide Panel
+- Settings UI
+- keyboard shortcuts 일부 처리
+
+Preload
+- DOM observer
+- adapter bootstrap
+- state signal extraction
+- IPC bridge
+
+16.2 권장 디렉터리 구조
+
+src/
+  main/
+    app/
+    windows/
+    views/
+    workspace/
+    telemetry/
+    ipc/
+    settings/
+  preload/
+    observers/
+    adapters/
+    bridge/
+  renderer/
+    components/
+    features/
+    store/
+    hooks/
+    pages/
+  shared/
+    types/
+    contracts/
+    utils/
+
+16.3 Telemetry 레이어 구조
+
+telemetry/
+  TelemetryGateway.ts
+  TelemetryService.ts
+  LocalSink.ts
+  PostHogSink.ts
+  transports/
+    PostHogNodeTransport.ts
+    PostHogHttpTransport.ts
+  queue/
+    TelemetryQueueRepository.ts
+    TelemetryRetryWorker.ts
+  schemas/
+    telemetryEvents.ts
+
+======================================================================
+17. UX 상세 규칙
+======================================================================
+
+- pane이 작아도 최소 상태는 보여야 한다:
+  - pane 번호
+  - 상태 배지
+  - unread 여부
+  - projectName(짧은 제목)
+- completed-unread는 1회성 깜빡임으로 끝나면 안 된다.
+- 사용자가 확인할 때까지 헤더 강조/배지/Ready Queue가 유지되어야 한다.
+- Guide Panel은 길게 쓰는 영역보다 빠르게 적는 영역이어야 한다.
+- projectName과 nextAction은 가장 쉽게 편집 가능해야 한다.
+- 확대 상태에서는 Guide Panel이 축약되거나 오버레이로 바뀔 수 있다.
+- 알림은 과한 자극을 피해야 한다.
+- debug mode에서는 pane 내부 감지 이유를 작게 표시할 수 있다.
+  - 예:
+    - stopButton=true
+    - mutationRate=high
+    - heartbeat=ok
+
+======================================================================
+18. 보안 / 개인정보 보호
+======================================================================
+
+원칙
+- Local First
+- Opt-in Telemetry
+- Metadata Only by Default
+- Secret stays in Main Process
+- Text content stays local
+
+세부 요구
+- project token/secure key는 환경변수 또는 OS 보안 저장소를 우선 고려한다.
+- renderer에 secure key를 직접 노출하지 않는다.
+- preload는 최소 권한만 가진다.
+- 외부 페이지에는 필요한 preload만 주입한다.
+- 원문 텍스트 전송은 기본 금지다.
+- debug log에도 민감 텍스트를 남기지 않는다.
+
+======================================================================
+19. 비기능 요구사항 (NFR)
+======================================================================
+
+NFR-001 성능
+- pane 4개 기준, 상태 감지와 UI 업데이트가 부드러워야 한다.
+- observer는 과도한 polling으로 CPU를 잡아먹으면 안 된다.
+
+NFR-002 안정성
+- pane 하나의 장애가 전체 앱을 멈추게 하면 안 된다.
+- PostHog 전송 실패가 앱 사용성을 해치면 안 된다.
+
+NFR-003 복구성
+- 앱 재시작 후 workspace/ready queue/guide를 복구할 수 있어야 한다.
+- unsent telemetry queue도 복구할 수 있어야 한다.
+
+NFR-004 확장성
+- SiteAdapter 추가가 가능해야 한다.
+- TelemetryTransport 교체가 가능해야 한다.
+
+NFR-005 관측성
+- debug mode에서 observer 상태와 telemetry queue 상태를 볼 수 있어야 한다.
+
+NFR-006 개인정보
+- 메타데이터 중심 수집이 기본이어야 한다.
+- 사용자가 opt-out 하면 즉시 원격 전송이 중단되어야 한다.
+
+======================================================================
+20. 수용 기준 (Acceptance Criteria)
+======================================================================
+
+AC-001
+- 사용자가 pane 수를 입력하면 해당 수만큼 pane이 생성된다.
+
+AC-002
+- 외부 모니터가 있을 때 기본적으로 그 모니터에 창이 열린다.
+
+AC-003
+- pane이 generating -> completed로 바뀌면 completed-unread와 Ready Queue가 정상 동작한다.
+
+AC-004
+- 사용자가 pane을 확인하면 unread가 해제된다.
+
+AC-005
+- Guide Panel 변경이 pane 단위로 저장/복구된다.
+
+AC-006
+- preset 저장/불러오기가 가능하다.
+
+AC-007
+- telemetry opt-in이 꺼져 있을 때 PostHog 전송이 발생하지 않는다.
+
+AC-008
+- telemetry opt-in이 켜져 있을 때 PostHog에 workspace opened, pane completed, pane marked read, guide updated, preset applied 이벤트가 전송된다.
+
+AC-009
+- 원문 prompt/response 텍스트가 PostHog에 전송되지 않는다.
+
+AC-010
+- PostHog host/token이 잘못되어도 앱 핵심 UX가 계속 동작한다.
+
+AC-011
+- 앱 종료 시 남은 이벤트 queue가 최대한 flush되고, 다음 실행 시 복구된다.
+
+AC-012
+- feature flags를 받아오지 못해도 로컬 기본값으로 앱이 정상 동작한다.
+
+======================================================================
+21. 구현 우선순위
+======================================================================
+
+P0 (반드시)
+- Electron shell + WebContentsView pane grid
+- 외부 모니터 감지/배치
+- ChatGPTAdapter v1
+- generating/completed/completed-unread 감지
+- Ready Queue
+- Guide Panel
+- workspace/preset 로컬 저장
+- LocalSink
+- PostHogSink (SDK mode)
+- telemetry opt-in
+- queue/retry/shutdown
+- pane 확대/축소
+- 기본 단축키
+
+P1 (권장)
+- slow/stalled 감지
+- feature flags / remote config
+- debug overlay
+- pane별 session 분리 옵션
+- host/region 설정 UI
+
+P2 (후속)
+- PostHog HTTP API fallback transport
+- self-hosted PostHog 가이드
+- adapter v2 실험 rollout
+- Claude/Gemini adapter 공통화
+- session replay의 제한적 도입(앱 HUD만)
+
+======================================================================
+22. GitHub Copilot에게 전달할 구현 원칙
+======================================================================
+
+1) TypeScript 기준으로 작성한다.
+2) Main / Renderer / Preload / Shared 타입을 명확히 분리한다.
+3) pane 콘텐츠는 WebContentsView 기준으로 구현한다.
+4) 상태 감지는 SiteAdapter로 분리한다.
+5) telemetry 전송은 TelemetryService 뒤에 숨긴다.
+6) PostHog 연동은 기본적으로 Main Process에서 처리한다.
+7) ChatGPT 원문 텍스트는 원격 전송하지 않는다.
+8) ready queue와 completed-unread를 핵심 UX로 취급한다.
+9) PostHog autocapture를 ChatGPT embedded view에 넣지 않는다.
+10) feature flag secure key는 renderer에 노출하지 않는다.
+11) PostHog가 실패해도 앱은 local only 모드로 계속 동작해야 한다.
+12) 전송 이벤트는 "안정적인 커스텀 이벤트"만 사용한다.
+13) 종료 시 queue flush + client shutdown을 수행한다.
+14) 수동 입력 Guide는 어떤 자동 기능도 덮어쓰지 못하게 한다.
+
+======================================================================
+23. 최종 판단
+======================================================================
+
+v1.2에서 가장 중요한 결정은 아래 두 가지다.
+
+결정 1
+- 이 제품은 외부 모니터링 툴이 pane 상태를 대신 감지해 주는 구조가 아니다.
+- pane 상태 감지는 앱 내부에서 한다.
+
+결정 2
+- 감지된 이벤트를 저장/분석/원격설정하는 외부 벤더는 PostHog를 쓴다.
+- 따라서 v1.2의 정답은 "내부 감지 엔진 + PostHog 외부 수집"이다.
+
+이 판단에 따라, 구현은 아래와 같이 간다.
+- 내부:
+  - WebContentsView
+  - ChatGPTAdapter
+  - Ready Queue
+  - Guide Panel
+  - Local Store
+- 외부:
+  - PostHogSink
+  - PostHog feature flags
+  - PostHog insights/dashboard
+
+즉, 이 앱은 "여러 GPT 화면 뷰어"가 아니라
+"여러 AI 작업 상태를 감시하고 다음 액션을 유지하는 관제판"이며,
+그 운영 데이터는 PostHog가 담당한다.
+
+======================================================================
+24. 부록 A - PostHog 구현 정책 요약
+======================================================================
+
+권장 기본값
+- telemetryOptIn = false
+- telemetryMode = local_only
+- posthog.mode = sdk-node
+- disableGeoip = true
+- useFeatureFlags = false (초기 개발 중)
+- includeSensitiveTextInTelemetry = false
+- session replay = off
+
+배포 이후 권장값
+- telemetryOptIn = 사용자 선택
+- telemetryMode = local_plus_posthog
+- useFeatureFlags = true
+- blink/threshold를 PostHog로 원격 조절
+- pane completed / pane error는 중요한 이벤트로 취급
+
+======================================================================
+25. 부록 B - 첫 번째 PostHog 대시보드에 꼭 넣을 그래프
+======================================================================
+
+1) pane completed 수 / 일
+2) pane slow 비율
+3) pane stalled 비율
+4) pane completed -> pane marked read median seconds
+5) preset applied 비율
+6) pane_count 별 세션 분포
+7) pane error top error_code
+8) telemetry delivery failed 추이
+9) feature flags refresh failed 추이
+10) ready queue depth max / workspace
+
+======================================================================
+26. 부록 C - Copilot이 가장 먼저 구현할 것
+======================================================================
+
+순서
+1) Electron shell
+2) WebContentsView pane manager
+3) pane grid layout
+4) ChatGPTAdapter v1 observer
+5) local workspace store
+6) Ready Queue
+7) Guide Panel
+8) PostHogSink + Local queue
+9) settings + telemetry opt-in
+10) feature flags / remote config
+
+주의
+- 초반에는 fancy UI보다 pane 상태와 queue 신뢰성을 우선한다.
+- observer의 정확도와 unread 유지가 제품 핵심이다.
+- telemetry는 제품 품질 개선을 위한 수단이지, 사용자 핵심 기능보다 우선이 아니다.
+
+끝.
