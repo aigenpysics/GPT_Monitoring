@@ -45,6 +45,7 @@ function start() {
 
       const isGenerating = adapter.isGenerating(document);
       const latest = adapter.getLatestAssistantMessageText(document);
+      const hasAssistantText = latest.trim().length > 0;
 
       if (isGenerating) {
         stableTicks = 0;
@@ -55,6 +56,12 @@ function start() {
         }
         post({ type: 'status', status: 'generating' });
       } else {
+        if (!hasAssistantText) {
+          stableTicks = 0;
+          post({ type: 'status', status: 'unknown' });
+          return;
+        }
+
         if (latest === lastText) {
           stableTicks += 1;
         } else {

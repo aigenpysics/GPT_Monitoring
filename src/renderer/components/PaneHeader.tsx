@@ -8,6 +8,7 @@ interface PaneHeaderProps {
   onOpenUrl: () => void;
   onToggleExpanded: () => void;
   onToggleGuide: () => void;
+  onDeletePane: () => void;
 }
 
 export function PaneHeader({
@@ -16,7 +17,8 @@ export function PaneHeader({
   onRefresh,
   onOpenUrl,
   onToggleExpanded,
-  onToggleGuide
+  onToggleGuide,
+  onDeletePane
 }: PaneHeaderProps) {
   return (
     <div className="pane-header">
@@ -30,6 +32,7 @@ export function PaneHeader({
         <button onClick={onRefresh}>Refresh</button>
         <button onClick={onToggleGuide}>Guide</button>
         <button onClick={onToggleExpanded}>{isExpanded ? 'Back' : 'Full'}</button>
+        <button className="danger-btn" onClick={onDeletePane}>Delete</button>
       </div>
     </div>
   );

@@ -31,6 +31,8 @@ export interface WorkspaceViewState {
   currentMonitorId: string;
   setFeatureFlags: (flags: WorkspaceViewState['featureFlags']) => void;
   setPaneCount: (count: number) => void;
+  addPane: () => void;
+  removePane: (paneId: string) => void;
   setExpandedPane: (paneId?: string) => void;
   updatePane: (paneId: string, updater: (pane: PaneState) => PaneState) => void;
   updateGuideField: (

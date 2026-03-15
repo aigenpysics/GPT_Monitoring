@@ -86,6 +86,53 @@ export const useWorkspaceStore = create<WorkspaceViewState>((set) => ({
         }
       };
     }),
+  addPane: () =>
+    set((state) => {
+      const prev = state.workspace.panes;
+      const nextCount = clampPaneCount(prev.length + 1);
+      if (nextCount === prev.length) {
+        return state;
+      }
+
+      const panes = [...prev, createPane(prev.length)].map((pane, index) => ({ ...pane, index }));
+      return {
+        workspace: {
+          ...state.workspace,
+          paneCount: panes.length,
+          panes,
+          updatedAt: new Date().toISOString()
+        }
+      };
+    }),
+  removePane: (paneId: string) =>
+    set((state) => {
+      const prev = state.workspace.panes;
+      if (prev.length <= 1) {
+        return state;
+      }
+
+      const exists = prev.some((pane) => pane.id === paneId);
+      if (!exists) {
+        return state;
+      }
+
+      const panes = prev
+        .filter((pane) => pane.id !== paneId)
+        .map((pane, index) => ({ ...pane, index }));
+      const nextActive = state.activePaneId === paneId ? panes[0]?.id : state.activePaneId;
+      const nextExpanded = state.workspace.expandedPaneId === paneId ? undefined : state.workspace.expandedPaneId;
+
+      return {
+        activePaneId: nextActive,
+        workspace: {
+          ...state.workspace,
+          paneCount: panes.length,
+          panes,
+          expandedPaneId: nextExpanded,
+          updatedAt: new Date().toISOString()
+        }
+      };
+    }),
   setExpandedPane: (paneId?: string) =>
     set((state) => ({
       workspace: {

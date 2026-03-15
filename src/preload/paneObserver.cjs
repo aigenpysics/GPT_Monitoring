@@ -90,6 +90,7 @@ function startObserver() {
 
       const generating = isGenerating();
       const latest = latestAssistantText();
+      const hasAssistantText = latest.trim().length > 0;
 
       if (generating) {
         stableTicks = 0;
@@ -100,6 +101,12 @@ function startObserver() {
         }
         post({ type: 'status', status: 'generating' });
       } else {
+        if (!hasAssistantText) {
+          stableTicks = 0;
+          post({ type: 'status', status: 'unknown' });
+          return;
+        }
+
         if (latest === lastText) {
           stableTicks += 1;
         } else {

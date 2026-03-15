@@ -238,6 +238,32 @@ textarea {
   padding: 4px 8px;
 }
 
+.pane-controls .danger-btn {
+  border-color: rgba(245, 101, 101, 0.55);
+  color: #ffd2d2;
+}
+
+.floating-add-pane {
+  position: fixed;
+  right: 18px;
+  bottom: 16px;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  font-size: 24px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  border-color: rgba(80, 200, 120, 0.7);
+  background: rgba(18, 35, 56, 0.92);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
+  z-index: 25;
+}
+
+.floating-add-pane:hover {
+  background: rgba(28, 51, 79, 0.98);
+}
+
 .pane-body {
   min-height: 0;
   display: grid;

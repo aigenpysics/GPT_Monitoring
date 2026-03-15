@@ -14,6 +14,7 @@ interface PaneProps {
   blinkCycles: number;
   onPaneFocus: (paneId: string) => void;
   onToggleExpanded: (paneId: string) => void;
+  onDeletePane: (paneId: string) => void;
   onUpdateGuide: (paneId: string, field: keyof PaneState['guide'], value: string) => void;
   onStatusUpdate: (paneId: string, updater: (pane: PaneState) => PaneState) => void;
 }
@@ -34,6 +35,7 @@ export function Pane({
   blinkCycles,
   onPaneFocus,
   onToggleExpanded,
+  onDeletePane,
   onUpdateGuide,
   onStatusUpdate
 }: PaneProps) {
@@ -85,8 +87,16 @@ export function Pane({
       if (payload.type === 'completed') {
         onStatusUpdate(pane.id, (prev) => {
           const isActive = activePaneId === pane.id;
-          const nextStatus = isActive ? 'completed' : 'completed-unread';
-          const nextUnread = !isActive;
+          const hasWorkContext = Boolean(
+            prev.guide.projectName.trim() ||
+              prev.guide.nextAction.trim() ||
+              prev.guide.summary.trim() ||
+              prev.guide.currentStatus.trim() ||
+              prev.guide.notes.trim()
+          );
+          const shouldUnread = !isActive && hasWorkContext;
+          const nextStatus = shouldUnread ? 'completed-unread' : 'completed';
+          const nextUnread = shouldUnread;
           if (prev.status === nextStatus && prev.unread === nextUnread) {
             return prev;
           }
@@ -174,6 +184,7 @@ export function Pane({
         onOpenUrl={onOpenUrl}
         onToggleExpanded={() => onToggleExpanded(pane.id)}
         onToggleGuide={() => setGuideOpen((prev) => !prev)}
+        onDeletePane={() => onDeletePane(pane.id)}
       />
 
       <div className="pane-body">

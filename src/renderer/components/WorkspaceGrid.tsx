@@ -12,6 +12,7 @@ interface WorkspaceGridProps {
   blinkCycles: number;
   onPaneFocus: (paneId: string) => void;
   onToggleExpanded: (paneId: string) => void;
+  onDeletePane: (paneId: string) => void;
   onUpdateGuide: (paneId: string, field: keyof PaneState['guide'], value: string) => void;
   onStatusUpdate: (paneId: string, updater: (pane: PaneState) => PaneState) => void;
 }
@@ -26,6 +27,7 @@ export function WorkspaceGrid({
   blinkCycles,
   onPaneFocus,
   onToggleExpanded,
+  onDeletePane,
   onUpdateGuide,
   onStatusUpdate
 }: WorkspaceGridProps) {
@@ -52,6 +54,7 @@ export function WorkspaceGrid({
           blinkCycles={blinkCycles}
           onPaneFocus={onPaneFocus}
           onToggleExpanded={onToggleExpanded}
+          onDeletePane={onDeletePane}
           onUpdateGuide={onUpdateGuide}
           onStatusUpdate={onStatusUpdate}
         />

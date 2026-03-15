@@ -30,6 +30,8 @@ function App() {
     paneObserverPreloadPath,
     setFeatureFlags,
     setPaneCount,
+    addPane,
+    removePane,
     setExpandedPane,
     updatePane,
     updateGuideField,
@@ -236,6 +238,17 @@ function App() {
             pane_id: paneId
           });
         }}
+        onDeletePane={(paneId) => {
+          if (workspace.paneCount <= 1) {
+            return;
+          }
+          removePane(paneId);
+          captureEvent('settings updated', {
+            action: 'pane removed',
+            pane_id: paneId,
+            pane_count_total: Math.max(1, workspace.paneCount - 1)
+          });
+        }}
         onUpdateGuide={(paneId, field, value) => {
           updateGuideField(paneId, field, value);
           if (typeof value === 'string') {
@@ -251,6 +264,23 @@ function App() {
         }}
         onStatusUpdate={handleStatusUpdate}
       />
+
+      {!workspace.expandedPaneId && workspace.paneCount < 9 && (
+        <button
+          className="floating-add-pane"
+          onClick={() => {
+            addPane();
+            captureEvent('pane created', {
+              count: 1,
+              pane_count_total: Math.min(9, workspace.paneCount + 1)
+            });
+          }}
+          aria-label="Add pane"
+          title="Add pane"
+        >
+          +
+        </button>
+      )}
 
       <SettingsModal
         open={settingsOpen}
